@@ -54,8 +54,8 @@ Zoom, Meet, Teams, etc.), then:
 
 1. Transcribes locally with Whisper `large-v3-turbo` via MLX (Metal-accelerated).
 2. Optionally labels speakers using `pyannote` diarization.
-3. Summarises with a local LLM (`Qwen3-8B`) into Zusammenfassung / Entscheidungen
-   / Aufgaben / Offene Fragen.
+3. Summarises with a local reasoning LLM (Qwen3.5 / Gemma 4, auto-picked for your
+   RAM) into Zusammenfassung / Entscheidungen / Aufgaben / Offene Fragen.
 4. Writes a Markdown transcript and an MP3 backup, and saves the summary to Apple
    Notes.
 
@@ -68,8 +68,13 @@ No audio or text leaves the machine. No accounts, no API keys.
 - MLX transcription, the fastest Whisper backend on Apple Silicon.
 - German by default, with multilingual and auto-detect support.
 - Speaker detection with an optional headcount hint (`auto`, `4`, or `3-6`).
-- Local LLM summaries with a fully editable prompt.
-- Menu-bar app with live status, model-download progress, and a settings popup.
+- Local LLM summaries with a fully editable prompt. Newest models built in:
+  Qwen3.5 (hybrid **reasoning** — thinks before it answers) and Gemma 4
+  (strongest multilingual). `auto` picks the best that fits your machine.
+- Menu-bar app with a real image icon, live status, model-download progress,
+  native notifications when a meeting is ready, and a settings popup.
+- An **About meetre** submenu (version, check for updates, restart, start at
+  login, quit).
 - Auto-update (`git pull`) on every launch, and start-at-login.
 - MP3 backups, and the ability to re-transcribe any audio file later.
 

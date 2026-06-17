@@ -55,6 +55,16 @@ IDLE_TITLE = "✦"
 SPINNER = ["✦", "✧", "⊹", "✧"]
 
 
+def _app_version() -> str:
+    """Installed package version, for the About submenu ('?' if unknown)."""
+    try:
+        from importlib.metadata import version
+
+        return version("meetre")
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def _require_rumps():
     if rumps is None:
         raise SystemExit(
@@ -317,6 +327,18 @@ class MeetreApp(rumps.App if rumps else object):
         self._spin = 0               # spinner frame counter
         self._notify_queue = []      # (title, subtitle, msg) from worker threads
 
+        # Real image icon for the menu bar (template-tinted), reused on
+        # notifications. Falls back to the Unicode glyph if it can't render.
+        from . import icon as _icon
+
+        self._icon_path = _icon.icon_path()
+        if self._icon_path:
+            try:
+                self.template = True       # adapt to light/dark menu bar
+                self.icon = self._icon_path
+            except Exception:  # noqa: BLE001
+                self._icon_path = None
+
         self._build_menu()
         # A single main-thread timer reflects state into the menu bar.
         self._timer = rumps.Timer(self._tick, 0.5)
@@ -378,11 +400,12 @@ class MeetreApp(rumps.App if rumps else object):
         summary_menu.add(auto_it)
         for alias, spec, fits in summarizer.model_catalog():
             inst = " ✓" if summarizer.is_installed(alias) else ""
+            think = " 🧠" if spec.thinks else ""
             if fits:
-                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){inst}",
+                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){think}{inst}",
                                     callback=self._make_summary_cb(alias))
             else:
-                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB) — needs more RAM")
+                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){think} — needs more RAM")
                 it.set_callback(None)  # disabled / grayed out
             it.state = 1 if (self.cfg.auto_summarize and self.cfg.summary_model == alias) else 0
             summary_menu.add(it)
@@ -414,6 +437,27 @@ class MeetreApp(rumps.App if rumps else object):
         self.persons_item = rumps.MenuItem("Person detection", callback=self.on_toggle_persons)
         self.persons_item.state = 1 if self.cfg.person_detection else 0
 
+        # "About meetre" groups the app-level actions (version, updates,
+        # restart, start-at-login, quit) into one submenu so the top level stays
+        # focused on recording and per-meeting options.
+        from . import autostart
+
+        about_menu = rumps.MenuItem("About meetre")
+        ver = rumps.MenuItem(f"meetre {_app_version()}")
+        ver.set_callback(None)
+        about_menu.add(ver)
+        tagline = rumps.MenuItem("Local meeting transcripts + summaries")
+        tagline.set_callback(None)
+        about_menu.add(tagline)
+        about_menu.add(None)
+        about_menu.add(rumps.MenuItem("Check for updates", callback=self.on_update))
+        about_menu.add(rumps.MenuItem("Restart meetre", callback=self.on_restart))
+        self.startup_item = rumps.MenuItem("Start at login", callback=self.on_toggle_startup)
+        self.startup_item.state = 1 if autostart.is_enabled() else 0
+        about_menu.add(self.startup_item)
+        about_menu.add(None)
+        about_menu.add(rumps.MenuItem("Quit meetre", callback=rumps.quit_application))
+
         self.menu = [
             self.status_item,
             None,
@@ -432,15 +476,8 @@ class MeetreApp(rumps.App if rumps else object):
             rumps.MenuItem("Open transcripts folder", callback=self.on_open_folder),
             downloads_menu,
             None,
-            rumps.MenuItem("Check for updates", callback=self.on_update),
+            about_menu,
         ]
-        from . import autostart
-
-        self.startup_item = rumps.MenuItem("Start at login", callback=self.on_toggle_startup)
-        self.startup_item.state = 1 if autostart.is_enabled() else 0
-        self.menu.add(self.startup_item)
-        self.menu.add(None)
-        self.menu.add(rumps.MenuItem("Quit meetre", callback=rumps.quit_application))
 
     # -- picker callbacks ---------------------------------------------------
 
@@ -449,7 +486,7 @@ class MeetreApp(rumps.App if rumps else object):
             self.cfg.model = model
             self.cfg.save()
             self._build_menu()
-            rumps.notification("meetre", "Model", f"Set to {model}")
+            self._post("meetre", "Model", f"Set to {model}")
         return cb
 
     def _make_lang_cb(self, code):
@@ -483,8 +520,8 @@ class MeetreApp(rumps.App if rumps else object):
             ) == 1:
                 freed = summarizer.uninstall_model(repo)
                 self._build_menu()
-                rumps.notification("meetre", "Model removed",
-                                   f"Freed {summarizer.human_size(freed)} — {repo}")
+                self._post("meetre", "Model removed",
+                           f"Freed {summarizer.human_size(freed)} — {repo}")
         return cb
 
     def _make_spk_cb(self, num):
@@ -584,7 +621,7 @@ class MeetreApp(rumps.App if rumps else object):
             rumps.alert("Could not start recording", str(e))
             return
         for msg in recorder.start_errors:
-            rumps.notification("meetre", "System audio unavailable", msg)
+            self._post("meetre", "System audio unavailable", msg)
 
         self._recorder = recorder
         self._rec_meta = (title, started, tmp_wav)
@@ -686,7 +723,11 @@ class MeetreApp(rumps.App if rumps else object):
                 duration=duration, model=self.cfg.model, backend=backend,
                 person_detection=use_persons, summary=summary,
             )
-            self._notify("meetre", "Transcript saved", path.name)
+            mins = int(duration // 60)
+            done_msg = ("Summary + transcript ready" if summary
+                        else "Transcript ready")
+            self._notify("meetre", f"✓ {title} — done",
+                         f"{done_msg} · {mins} min · {path.name}")
 
             # Auto-save the same summary + transcript to Apple Notes.
             if self.cfg.auto_notes:
@@ -799,6 +840,24 @@ class MeetreApp(rumps.App if rumps else object):
     def on_update(self, sender=None):
         threading.Thread(target=self._do_update, args=(True,), daemon=True).start()
 
+    def on_restart(self, sender=None):
+        """Relaunch the app in place (e.g. to apply a downloaded update)."""
+        if self.state != "idle":
+            if rumps.alert(
+                title="Restart meetre?",
+                message="A recording or processing job is still running. "
+                        "Restart anyway and discard it?",
+                ok="Restart", cancel="Cancel",
+            ) != 1:
+                return
+        import os
+        import sys
+
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as e:  # noqa: BLE001
+            rumps.alert("Could not restart", str(e))
+
     def _do_update(self, interactive=False):
         from . import updater
 
@@ -838,14 +897,21 @@ class MeetreApp(rumps.App if rumps else object):
         """
         self._notify_queue.append((title, subtitle, msg))
 
+    def _post(self, title, subtitle, msg):
+        """Post a notification now (main thread only), with the app icon."""
+        try:
+            rumps.notification(title, subtitle, msg, icon=self._icon_path)
+        except TypeError:
+            # Older rumps without the icon kwarg.
+            rumps.notification(title, subtitle, msg)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _tick(self, _timer):
         # Deliver any queued notifications on the main thread.
         while self._notify_queue:
             title, subtitle, msg = self._notify_queue.pop(0)
-            try:
-                rumps.notification(title, subtitle, msg)
-            except Exception:  # noqa: BLE001
-                pass
+            self._post(title, subtitle, msg)
         self._spin = (self._spin + 1) % len(SPINNER)
         if self.state == "recording" and self._recorder is not None:
             m, s = divmod(int(self._recorder.seconds), 60)
@@ -865,7 +931,9 @@ class MeetreApp(rumps.App if rumps else object):
                 self.title = star
                 self._set_status(f"{star} {stage}")
         else:
-            self.title = IDLE_TITLE
+            # With an image icon the status bar already shows the glyph, so the
+            # idle title is blank; otherwise fall back to the Unicode sparkle.
+            self.title = "" if self._icon_path else IDLE_TITLE
             self._set_status("✦ Ready")
 
 
