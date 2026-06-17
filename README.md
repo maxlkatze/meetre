@@ -14,18 +14,28 @@ supported for the full pipeline.
 
 ## Quick install
 
+No git or admin required — one line downloads and installs everything:
+
+```bash
+curl -fsSL https://github.com/maxlkatze/meetre/archive/refs/heads/main.tar.gz | tar -xz && cd meetre-main && bash install.sh
+```
+
+Already have git? You can clone instead:
+
 ```bash
 git clone https://github.com/maxlkatze/meetre.git && cd meetre && bash install.sh
 ```
 
 The installer needs no admin password. It uses your existing `python3`/`git` if
-present, otherwise downloads a local, relocatable Python into `.runtime/`. It
-creates a virtual environment, installs meetre and the menu-bar app, links
-`meetre` into `~/.local/bin`, asks for an optional HuggingFace token, registers a
-login startup item, and launches the menu bar.
+present, otherwise downloads a **local, relocatable Python** and a **local git**
+(via micromamba) into `.runtime/`. It then creates a virtual environment,
+installs meetre and the menu-bar app, links `meetre` into `~/.local/bin`, asks for
+an optional HuggingFace token, links the install to the repo so auto-update works,
+registers a login startup item, and launches the menu bar.
 
 After installing, look for the `✦` icon in the top-right menu bar and click
-**Record…**.
+**Record…**. Run `meetre` any time to open the menu bar, or `meetre cli` for the
+text menu.
 
 > The first recording asks for the **Screen Recording** permission (system audio).
 > Saving to Notes asks for **Automation** permission. Both are one-time.
@@ -118,7 +128,8 @@ close the terminal.
 ## Command line
 
 ```bash
-meetre                       # interactive menu
+meetre                       # launch the menu-bar app (default)
+meetre cli                   # interactive text menu
 meetre menubar               # launch the menu-bar app (detached)
 
 meetre record --name "Standup"

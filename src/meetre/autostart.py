@@ -25,7 +25,8 @@ def _plist_xml() -> str:
     python = sys.executable
     # Include common dirs + a bundled local git on PATH for auto-update.
     root = Path(__file__).resolve().parents[2]
-    path = f"{Path(python).parent}:{root}/.runtime/git/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+    path = (f"{Path(python).parent}:{root}/.runtime/conda/bin:{root}/.runtime/git/bin:"
+            "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")
     out_log = _LOG_DIR / "menubar.out.log"
     err_log = _LOG_DIR / "menubar.err.log"
     return f"""<?xml version="1.0" encoding="UTF-8"?>

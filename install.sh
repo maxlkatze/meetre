@@ -65,14 +65,27 @@ else
   ok "Local Python: $PY ($("$PY" --version 2>&1))"
 fi
 
-# --- 2. Git (only checked; needed for auto-update) --------------------------
+# --- 2. Git (existing, else install a LOCAL git without admin) -------------
+REPO_URL="https://github.com/maxlkatze/meetre.git"
+GIT=""
 if git --version >/dev/null 2>&1; then
-  ok "Git: $(command -v git) ($(git --version))"
+  GIT="$(command -v git)"
+  ok "Git: $GIT ($(git --version))"
 else
-  warn "Git not found. Auto-update needs git."
-  info "Triggering the Xcode Command Line Tools installer (no admin password)…"
-  xcode-select --install 2>/dev/null || true
-  warn "Finish the popup, then re-run install.sh. Continuing without git for now."
+  info "No git found — installing a local git without admin (via micromamba)…"
+  case "$ARCH" in aarch64) MM_ARCH="osx-arm64" ;; x86_64) MM_ARCH="osx-64" ;; esac
+  export MAMBA_ROOT_PREFIX="$RUNTIME/mamba"
+  mkdir -p "$RUNTIME"
+  if curl -fsSL "https://micro.mamba.pm/api/micromamba/${MM_ARCH}/latest" \
+       | tar -xj -C "$RUNTIME" bin/micromamba 2>/dev/null \
+     && "$RUNTIME/bin/micromamba" create -y -q -p "$RUNTIME/conda" -c conda-forge git >/dev/null 2>&1 \
+     && [ -x "$RUNTIME/conda/bin/git" ]; then
+    GIT="$RUNTIME/conda/bin/git"
+    export PATH="$RUNTIME/conda/bin:$PATH"
+    ok "Local git installed: $GIT ($("$GIT" --version))"
+  else
+    warn "Could not install git automatically — auto-update will be disabled."
+  fi
 fi
 
 # --- 3. Virtual environment + dependencies ---------------------------------
@@ -111,12 +124,28 @@ else
   info "Skipped — add later with:  meetre config hf_token <token>"
 fi
 
-# --- 6. Startup item + launch the menu bar ---------------------------------
+# --- 6. Make this a git checkout (so auto-update works) --------------------
+# Tarball/curl installs aren't git repos; turn the folder into one tracking main.
+if [ -n "$GIT" ] && [ ! -d ".git" ]; then
+  info "Linking this install to $REPO_URL for auto-update…"
+  if "$GIT" init -q \
+     && "$GIT" remote add origin "$REPO_URL" \
+     && "$GIT" fetch -q --depth 1 origin main \
+     && "$GIT" reset -q --hard FETCH_HEAD \
+     && "$GIT" branch -M main \
+     && "$GIT" branch --set-upstream-to=origin/main main >/dev/null 2>&1; then
+    ok "Auto-update enabled (origin/main)"
+  else
+    warn "Could not link to the remote; auto-update disabled (install still works)."
+  fi
+fi
+
+# --- 7. Startup item + launch the menu bar ---------------------------------
 info "Registering login startup item and launching the menu bar…"
 .venv/bin/python -c "from meetre import autostart; autostart.enable()"
 ok "Menu-bar app started and set to launch at login (✦ icon, top-right)."
 
-# --- 7. Done ---------------------------------------------------------------
+# --- 8. Done ---------------------------------------------------------------
 echo
 bold "meetre is ready."
 echo "  • Menu bar:  the ✦ icon (top-right). Click → ● Record…"

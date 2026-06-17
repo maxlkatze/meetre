@@ -24,13 +24,17 @@ def repo_root() -> Optional[Path]:
 
 
 def _git() -> Optional[str]:
-    """Path to a usable git: a bundled local one, else from PATH."""
+    """Path to a usable git: one from PATH, else a locally-installed one."""
+    found = shutil.which("git")
+    if found:
+        return found
     root = repo_root()
     if root:
-        local = root / ".runtime" / "git" / "bin" / "git"
-        if local.exists():
-            return str(local)
-    return shutil.which("git")
+        for cand in (root / ".runtime" / "conda" / "bin" / "git",
+                     root / ".runtime" / "git" / "bin" / "git"):
+            if cand.exists():
+                return str(cand)
+    return None
 
 
 def _run(git: str, root: Path, *args: str) -> subprocess.CompletedProcess:
