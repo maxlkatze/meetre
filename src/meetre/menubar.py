@@ -55,6 +55,21 @@ IDLE_TITLE = "✦"
 SPINNER = ["✦", "✧", "⊹", "✧"]
 
 
+def _summary_error_hint(e: Exception) -> str:
+    """Turn a raw summarizer error into an actionable message.
+
+    The most common one is an mlx-lm too old for a newer architecture (e.g.
+    'Model type gemma4 not supported'), which otherwise surfaces as a fleeting
+    failure and an empty summary. Point the user at the update path instead.
+    """
+    msg = str(e)
+    low = msg.lower()
+    if "not supported" in low or "model type" in low or "unknown model" in low:
+        return ("This model needs a newer mlx-lm. Run 'meetre update', or pick "
+                "another summary model. (" + msg + ")")
+    return msg
+
+
 def _app_version() -> str:
     """Installed package version, for the About submenu ('?' if unknown)."""
     try:
@@ -803,7 +818,7 @@ class MeetreApp(rumps.App if rumps else object):
                 text, model=self.cfg.summary_model, language=self.cfg.language,
                 prompt=self.cfg.summary_prompt or None)
         except Exception as e:  # noqa: BLE001
-            self._notify("meetre", "Summary failed", str(e))
+            self._notify("meetre", "Summary failed", _summary_error_hint(e))
             return ""
 
     def _summarize_path(self, path: Path):
