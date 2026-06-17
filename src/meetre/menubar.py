@@ -702,6 +702,22 @@ class MeetreApp(rumps.App if rumps else object):
         self._download = None
         self._stage_text = text
 
+    def _progress(self, label, frac):
+        """Progress callback for transcriber/diarizer hooks.
+
+        ``frac`` None → just a stage label (indeterminate); a number → a bar.
+        Safe to call from the worker thread; the main-thread timer renders it.
+        """
+        if frac is None:
+            self._download = None
+            self._stage_text = label
+        else:
+            self._download = (label, max(0.0, min(1.0, frac)))
+
+    def _tx_progress(self, done, total):
+        """Adapter: transcription reports (seconds_done, total_seconds)."""
+        self._progress("Transcribing", (done / total) if total else None)
+
     def _ensure_model(self, repo, label):
         """Download a model if needed, streaming progress to the menu bar."""
         from . import downloads
@@ -751,13 +767,14 @@ class MeetreApp(rumps.App if rumps else object):
                     compute_type=self.cfg.compute_type, detect_speakers=use_persons,
                     hf_token=self.cfg.hf_token, num_speakers=self.cfg.num_speakers,
                     min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers,
+                    progress=self._tx_progress, diar_progress=self._progress,
                 )
                 use_persons = True
             else:
                 self._stage("Transcribing…")
                 segments, backend = transcriber.transcribe(
                     final_audio, model=self.cfg.model, language=self.cfg.language,
-                    compute_type=self.cfg.compute_type,
+                    compute_type=self.cfg.compute_type, progress=self._tx_progress,
                 )
                 if segments and use_persons:
                     self._stage("Detecting speakers…")
@@ -767,6 +784,7 @@ class MeetreApp(rumps.App if rumps else object):
                             num_speakers=self.cfg.num_speakers,
                             min_speakers=self.cfg.min_speakers,
                             max_speakers=self.cfg.max_speakers,
+                            progress=self._progress,
                         )
                     except RuntimeError as e:
                         self._notify("meetre", "Speaker detection skipped", str(e))

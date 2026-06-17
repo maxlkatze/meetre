@@ -75,8 +75,9 @@ No audio or text leaves the machine. No accounts, no API keys.
 - Local LLM summaries with a fully editable prompt. Newest models built in:
   Qwen3.5 and Gemma 4 (strongest multilingual), run in fast direct mode.
   `auto` picks the best that fits your machine.
-- Menu-bar app with a real image icon, live status, model-download progress,
-  native notifications when a meeting is ready, and a settings popup.
+- Menu-bar app with a real image icon, live status, progress bars (model
+  download, transcription, speaker detection), native notifications when a
+  meeting is ready, and a settings popup.
 - An **About meetre** submenu (version, check for updates, restart, start at
   login, quit).
 - Auto-update (`git pull`) on every launch, and start-at-login.
@@ -204,8 +205,10 @@ meetre persons on
 meetre speakers 3-6                # headcount hint for the remote side
 ```
 
-Accept the model terms at `huggingface.co/pyannote/speaker-diarization-3.1` and
-`.../segmentation-3.0` first.
+Speaker detection uses the `pyannote/speaker-diarization-community-1` pipeline
+(pyannote.audio 4.x) — accept its model terms at
+`huggingface.co/pyannote/speaker-diarization-community-1` first. Live progress
+(segmenting / analyzing voices / assigning) shows on the menu-bar bar.
 
 ## Local summaries
 

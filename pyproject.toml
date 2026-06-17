@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meetre"
-version = "0.2.6"
+version = "0.2.7"
 description = "Record macOS audio and turn meetings into transcripts with speaker association."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,12 +31,11 @@ menubar = [
     "pyobjc-framework-Cocoa>=10.0",
 ]
 # Speaker diarization ("person detection"). Heavy; pulls in torch + pyannote.
-# huggingface_hub is pinned <1.0 because pyannote.audio 3.x still calls the
-# removed `use_auth_token` argument.
+# pyannote.audio 4.x is required for the speaker-diarization-community-1 pipeline
+# (and fixes the old use_auth_token issue, so no huggingface_hub pin is needed).
 persons = [
-    "pyannote.audio>=3.1",
+    "pyannote.audio>=4.0",
     "torch>=2.0",
-    "huggingface_hub<1.0",
 ]
 
 [project.scripts]

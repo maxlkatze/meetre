@@ -232,6 +232,8 @@ def transcribe_attributed(
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
+    progress=None,
+    diar_progress=None,
 ) -> Tuple[List[Segment], str]:
     """Transcribe the mixed audio once, then attribute speakers from the stems.
 
@@ -241,10 +243,13 @@ def transcribe_attributed(
     sample-aligned with the mix. With ``detect_speakers``, pyannote runs on each
     stem separately so multiple local AND multiple remote speakers are split
     (e.g. "Ich"/"Vor Ort 2" locally, "Sprecher 1/2" remotely).
+
+    ``progress`` is ``callable(seconds_done, total_seconds)`` for transcription;
+    ``diar_progress`` is ``callable(label, fraction)`` for the pyannote steps.
     """
     import soundfile as sf
 
-    segments, backend = transcribe(mix_path, model, language, compute_type)
+    segments, backend = transcribe(mix_path, model, language, compute_type, progress=progress)
     if not segments:
         return segments, backend
 
@@ -281,14 +286,16 @@ def transcribe_attributed(
     #    the side.
     if detect_speakers:
         try:
-            mic_turns = diarize_turns(Path(stems["mic"]), hf_token) if stems.get("mic") and mic is not None else []
+            mic_turns = diarize_turns(Path(stems["mic"]), hf_token, progress=diar_progress) \
+                if stems.get("mic") and mic is not None else []
             _assign_side(mic_segs, mic_turns, lbl["local"], lbl["local_multi"])
         except RuntimeError:
             for s in mic_segs:
                 s.speaker = lbl["local"]
         try:
             sys_turns = diarize_turns(Path(stems["system"]), hf_token,
-                                      num_speakers, min_speakers, max_speakers) \
+                                      num_speakers, min_speakers, max_speakers,
+                                      progress=diar_progress) \
                 if stems.get("system") and system is not None else []
             _assign_side(sys_segs, sys_turns, lbl["remote"], lbl["remote_multi"])
         except RuntimeError:
@@ -314,16 +321,54 @@ def diarization_ready(hf_token: Optional[str]) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
+# pyannote diarization pipeline. "community-1" (ships with pyannote.audio 4.x)
+# is markedly more accurate than the older 3.1 pipeline.
+_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
+
+# Friendlier labels for pyannote's internal step names (shown on the progress bar).
+_DIAR_STEPS = {
+    "segmentation": "Speakers: segmenting",
+    "speaker_counting": "Speakers: counting",
+    "embeddings": "Speakers: analyzing voices",
+    "discrete_diarization": "Speakers: assigning",
+}
+
+
+def _pyannote_hook(progress):
+    """A pyannote-compatible hook that forwards step progress to ``progress``.
+
+    pyannote calls ``hook(step_name, step_artifact=None, file=None, total=None,
+    completed=None)`` as each internal step runs (same protocol as the library's
+    ProgressHook, but routed to the menu bar instead of the console). We turn it
+    into ``progress(label, fraction)`` — ``fraction`` is None when a step has no
+    determinate total. Returns None if ``progress`` is None (so the pipeline
+    just runs without a hook).
+    """
+    if progress is None:
+        return None
+
+    def hook(step_name, step_artifact=None, file=None, total=None, completed=None):
+        label = _DIAR_STEPS.get(step_name) or "Detecting speakers"
+        if total:
+            progress(label, max(0.0, min(1.0, (completed or 0) / total)))
+        else:
+            progress(label, None)
+
+    return hook
+
+
 def diarize_turns(
     audio_path: Path,
     hf_token: Optional[str],
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
+    progress=None,
 ) -> List[tuple]:
     """Run pyannote and return raw speaker turns ``[(start, end, label), …]``.
 
-    Requires the ``persons`` extra and a HuggingFace token.
+    Requires the ``persons`` extra and a HuggingFace token. ``progress`` is an
+    optional ``callable(label, fraction)`` fed live by pyannote's step hook.
     """
     try:
         from pyannote.audio import Pipeline
@@ -351,9 +396,11 @@ def diarize_turns(
 
     torch.load = _trusting_load
     try:
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1", use_auth_token=hf_token
-        )
+        # pyannote.audio 4.x takes ``token=``; 3.x takes ``use_auth_token=``.
+        try:
+            pipeline = Pipeline.from_pretrained(_DIARIZATION_MODEL, token=hf_token)
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(_DIARIZATION_MODEL, use_auth_token=hf_token)
     finally:
         torch.load = _orig_load
 
@@ -366,7 +413,8 @@ def diarize_turns(
             kwargs["min_speakers"] = min_speakers
         if max_speakers:
             kwargs["max_speakers"] = max_speakers
-    diarization = pipeline(str(audio_path), **kwargs)
+    hook = _pyannote_hook(progress)
+    diarization = pipeline(str(audio_path), hook=hook, **kwargs)
     return [
         (turn.start, turn.end, speaker)
         for turn, _, speaker in diarization.itertracks(yield_label=True)
@@ -403,9 +451,11 @@ def diarize(
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
+    progress=None,
 ) -> List[Segment]:
     """Assign a "Speaker N" label to each segment using pyannote on one file."""
-    turns = diarize_turns(audio_path, hf_token, num_speakers, min_speakers, max_speakers)
+    turns = diarize_turns(audio_path, hf_token, num_speakers, min_speakers,
+                          max_speakers, progress=progress)
     label_map: dict = {}
     for seg in segments:
         raw = _best_turn(turns, seg.start, seg.end)
