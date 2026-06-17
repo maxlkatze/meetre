@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meetre"
-version = "0.2.7"
+version = "0.2.8"
 description = "Record macOS audio and turn meetings into transcripts with speaker association."
 readme = "README.md"
 requires-python = ">=3.11"

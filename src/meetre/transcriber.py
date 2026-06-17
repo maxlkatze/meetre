@@ -414,10 +414,14 @@ def diarize_turns(
         if max_speakers:
             kwargs["max_speakers"] = max_speakers
     hook = _pyannote_hook(progress)
-    diarization = pipeline(str(audio_path), hook=hook, **kwargs)
+    output = pipeline(str(audio_path), hook=hook, **kwargs)
+    # pyannote.audio 4.x (community-1) returns a result object exposing the
+    # Annotation under `.speaker_diarization`; 3.x returned the Annotation
+    # directly. Handle both.
+    annotation = getattr(output, "speaker_diarization", output)
     return [
         (turn.start, turn.end, speaker)
-        for turn, _, speaker in diarization.itertracks(yield_label=True)
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
     ]
 
 
