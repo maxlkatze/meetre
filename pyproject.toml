@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meetre"
-version = "0.3.0"
+version = "0.3.1"
 description = "Record macOS audio and turn meetings into transcripts with speaker association."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 # Portable CPU fallback (Intel Macs, or non-Apple-Silicon).
 cpu = ["faster-whisper>=1.0.0"]
+# Alternative transcription backend: NVIDIA Parakeet TDT v3 on MLX (multilingual,
+# very fast). Selectable as the "parakeet-tdt-v3" model.
+parakeet = ["parakeet-mlx>=0.4"]
 # macOS menu-bar app (status-bar icon, settings popup with pickers + slider).
 menubar = [
     "rumps>=0.4.0",

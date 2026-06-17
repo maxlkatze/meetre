@@ -53,8 +53,19 @@ class Segment:
     speaker: Optional[str] = None
 
 
+# Alternative backend: NVIDIA Parakeet TDT v3 on MLX (multilingual, very fast,
+# supports streaming). Selectable as the "parakeet-tdt-v3" model.
+PARAKEET_MODELS = {"parakeet-tdt-v3": "mlx-community/parakeet-tdt-0.6b-v3"}
+
+
+def is_parakeet(model: Optional[str]) -> bool:
+    return bool(model) and (model in PARAKEET_MODELS or model.startswith("parakeet"))
+
+
 def mlx_repo(model: str) -> str:
-    """The HuggingFace repo MLX uses for a given whisper model size."""
+    """The HuggingFace repo for a given model (whisper size or parakeet)."""
+    if model in PARAKEET_MODELS:
+        return PARAKEET_MODELS[model]
     return MLX_REPOS.get(model, MLX_REPOS["base"])
 
 
@@ -86,6 +97,8 @@ def transcribe(
     Returns ``(segments, backend_name)``. ``progress`` is an optional
     callable(seconds_done, total_seconds) for UI updates.
     """
+    if is_parakeet(model):
+        return _transcribe_parakeet(audio_path, model, progress), "parakeet-tdt-v3"
     backend = available_backend()
     if backend == "mlx-whisper":
         return _transcribe_mlx(audio_path, model, language, progress), backend
@@ -188,6 +201,64 @@ def _transcribe_mlx(audio_path, model, language, progress) -> List[Segment]:
         out.append(Segment(start=s["start"], end=s["end"], text=s["text"].strip()))
         if progress is not None:
             progress(s["end"], total)
+    return out
+
+
+def _parakeet_load_audio(filename, sampling_rate, dtype=None):
+    """Replacement for parakeet-mlx's ffmpeg-only loader: read via soundfile and
+    resample to the model's rate, returning a normalised mono mx float32 array."""
+    import mlx.core as mx
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(str(filename), dtype="float32", always_2d=False)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != sampling_rate and len(data):
+        n = int(round(len(data) * sampling_rate / sr))
+        data = np.interp(
+            np.linspace(0, len(data), n, endpoint=False), np.arange(len(data)), data
+        ).astype("float32")
+    return mx.array(np.ascontiguousarray(data, dtype="float32"))
+
+
+_parakeet_cache: dict = {}
+
+
+def load_parakeet(repo: str):
+    """Load (and cache) a Parakeet model, patching out its ffmpeg dependency."""
+    try:
+        import parakeet_mlx
+        from parakeet_mlx import from_pretrained
+    except ImportError as e:  # pragma: no cover - optional extra
+        raise RuntimeError(
+            "Parakeet needs the 'parakeet' extra: pip install 'meetre[parakeet]'"
+        ) from e
+    # parakeet-mlx decodes audio with ffmpeg; meetre ships none, so route its
+    # file loading through soundfile instead.
+    parakeet_mlx.parakeet.load_audio = _parakeet_load_audio
+    if repo not in _parakeet_cache:
+        _parakeet_cache[repo] = from_pretrained(repo)
+    return _parakeet_cache[repo]
+
+
+def _transcribe_parakeet(audio_path, model, progress=None) -> List[Segment]:
+    repo = PARAKEET_MODELS.get(model, model)
+    pk = load_parakeet(repo)
+
+    cb = None
+    if progress is not None:
+        def cb(done, total):  # parakeet reports (samples_done, total_samples)
+            progress(done, total)
+
+    # chunk_duration enables progress + bounds memory on long meetings.
+    result = pk.transcribe(str(audio_path), chunk_duration=120.0, chunk_callback=cb)
+    out: List[Segment] = [
+        Segment(start=float(s.start), end=float(s.end), text=s.text.strip())
+        for s in result.sentences
+    ]
+    if not out and result.text.strip():
+        out.append(Segment(start=0.0, end=0.0, text=result.text.strip()))
     return out
 
 

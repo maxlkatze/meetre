@@ -16,9 +16,11 @@ from typing import Optional
 CONFIG_DIR = Path(os.path.expanduser("~/.config/meetre"))
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
-# Whisper model sizes, smallest/fastest first. large-v3-turbo is the best
-# quality/speed balance on Apple Silicon and the default.
-MODELS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+# Transcription models. Whisper sizes (smallest/fastest first; large-v3-turbo is
+# the best quality/speed balance on Apple Silicon and the default), plus NVIDIA
+# Parakeet TDT v3 on MLX (multilingual, very fast, supports live streaming).
+MODELS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo",
+          "parakeet-tdt-v3"]
 
 
 @dataclass

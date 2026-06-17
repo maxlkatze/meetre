@@ -753,9 +753,10 @@ class MeetreApp(rumps.App if rumps else object):
             except Exception:  # noqa: BLE001
                 pass
 
-            # Ensure the whisper model is present (shows a download bar).
+            # Ensure the transcription model is present (shows a download bar).
             self._stage("Loading transcription model…")
-            self._ensure_model(transcriber.mlx_repo(self.cfg.model), f"Whisper {self.cfg.model}")
+            _tx_label = "Parakeet" if transcriber.is_parakeet(self.cfg.model) else "Whisper"
+            self._ensure_model(transcriber.mlx_repo(self.cfg.model), f"{_tx_label} {self.cfg.model}")
             use_persons = self.cfg.person_detection
 
             source_aware = "mic" in stems and "system" in stems
