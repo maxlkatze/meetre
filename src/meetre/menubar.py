@@ -55,6 +55,26 @@ IDLE_TITLE = "✦"
 SPINNER = ["✦", "✧", "⊹", "✧"]
 
 
+def _ensure_bundle_identifier(bundle_id: str = "com.agendaro.meetre") -> None:
+    """Give the process a bundle identifier so notifications work.
+
+    Run unbundled as ``python -m meetre.menubar``, the main bundle has no
+    CFBundleIdentifier, so ``NSUserNotificationCenter.defaultUserNotificationCenter()``
+    returns nil and every ``rumps.notification`` is silently dropped. Injecting an
+    id into the in-memory info dictionary makes the center valid and notifications
+    deliver. No-op if an id is already present (e.g. a real .app bundle).
+    """
+    try:
+        from Foundation import NSBundle
+
+        bundle = NSBundle.mainBundle()
+        info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info is not None and not info.get("CFBundleIdentifier"):
+            info["CFBundleIdentifier"] = bundle_id
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _summary_error_hint(e: Exception) -> str:
     """Turn a raw summarizer error into an actionable message.
 
@@ -335,6 +355,9 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
 
 class MeetreApp(rumps.App if rumps else object):
     def __init__(self):
+        # Must run before any notification: gives the unbundled process a bundle
+        # identifier so the notification center isn't nil.
+        _ensure_bundle_identifier()
         # quit_button=None: we add our own Quit item in _build_menu so it keeps
         # a stable position after every menu rebuild (rumps' auto button can
         # otherwise duplicate or jump).
@@ -920,12 +943,36 @@ class MeetreApp(rumps.App if rumps else object):
         self._notify_queue.append((title, subtitle, msg))
 
     def _post(self, title, subtitle, msg):
-        """Post a notification now (main thread only), with the app icon."""
+        """Post a notification now (main thread only), with the app icon.
+
+        Uses the native center (shows the app icon) when it's available, and
+        falls back to AppleScript otherwise so a notification always appears.
+        """
         try:
-            rumps.notification(title, subtitle, msg, icon=self._icon_path)
-        except TypeError:
-            # Older rumps without the icon kwarg.
-            rumps.notification(title, subtitle, msg)
+            from Foundation import NSUserNotificationCenter
+
+            if NSUserNotificationCenter.defaultUserNotificationCenter() is not None:
+                try:
+                    rumps.notification(title, subtitle, msg, icon=self._icon_path)
+                except TypeError:
+                    rumps.notification(title, subtitle, msg)  # older rumps
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        self._osascript_notify(title, subtitle, msg)
+
+    @staticmethod
+    def _osascript_notify(title, subtitle, msg):
+        """Fallback notification via AppleScript (works for unbundled apps)."""
+        import subprocess
+
+        def esc(s):
+            return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+        script = (f'display notification "{esc(msg)}" '
+                  f'with title "{esc(title)}" subtitle "{esc(subtitle)}"')
+        try:
+            subprocess.run(["osascript", "-e", script], check=False, timeout=5)
         except Exception:  # noqa: BLE001
             pass
 

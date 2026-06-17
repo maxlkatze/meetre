@@ -430,8 +430,18 @@ def resolve_model(name: Optional[str]) -> str:
 
 
 def _strip_thinking(text: str) -> str:
-    # Qwen3 may emit <think>…</think> reasoning; drop it.
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    """Remove a reasoning model's chain-of-thought from its output.
+
+    Reasoning models (Qwen3.5) emit a <think>…</think> block. Their chat
+    template pre-fills the OPENING <think> as part of the prompt, so the
+    generated text usually contains only the reasoning followed by a trailing
+    </think> and then the answer — with no opening tag. Drop everything up to
+    and including the last </think>, then also clear any fully-tagged block.
+    """
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[-1]
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 def _chunks(text: str, size: int = _CHUNK_CHARS) -> List[str]:
