@@ -61,6 +61,17 @@ def _pythonpath() -> str:
 
 
 def _version() -> str:
+    # Prefer the repo's pyproject (current after git pull); the installed
+    # metadata freezes at install time and goes stale on version bumps.
+    try:
+        import tomllib  # Python 3.11+
+
+        data = tomllib.loads((_root() / "pyproject.toml").read_text())
+        v = data.get("project", {}).get("version")
+        if v:
+            return v
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from importlib.metadata import version
 

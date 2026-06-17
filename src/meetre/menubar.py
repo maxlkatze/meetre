@@ -91,7 +91,23 @@ def _summary_error_hint(e: Exception) -> str:
 
 
 def _app_version() -> str:
-    """Installed package version, for the About submenu ('?' if unknown)."""
+    """Version for the About submenu ('?' if unknown).
+
+    Reads the repo's pyproject.toml first: this is a git/editable install, so
+    pyproject is the source of truth and stays current after `meetre update`'s
+    git pull, whereas the installed package metadata freezes at install time and
+    goes stale on every version bump. Falls back to that metadata.
+    """
+    try:
+        import tomllib  # Python 3.11+
+
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        data = tomllib.loads(pyproject.read_text())
+        version = data.get("project", {}).get("version")
+        if version:
+            return version
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from importlib.metadata import version
 
