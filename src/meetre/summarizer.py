@@ -1,8 +1,9 @@
 """Local LLM summarization of meeting transcripts via MLX-LM.
 
-Default model is Qwen3-8B at 4-bit (~4.7 GB) — the strongest German/multilingual
-quality in the sub-8B class that still fits a 5 GB budget, running on Apple's
-MLX runtime (same stack as transcription, no extra server needed).
+Models are chosen per machine from SUMMARY_MODELS (current generation: Qwen3.5
+hybrid-reasoning + Gemma 4); "auto" picks the best that fits the available
+unified memory. Everything runs on Apple's MLX runtime — same stack as
+transcription, no extra server needed.
 """
 
 from __future__ import annotations
@@ -17,28 +18,51 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # A summary model: HF repo, approximate 4-bit weight size in GB (measured from
-# the mlx-community repos), and a one-line note. The size drives the per-machine
-# "does this fit?" check below — bigger models give better German summaries but
-# need proportionally more unified memory.
-ModelSpec = namedtuple("ModelSpec", "repo size_gb note")
+# the mlx-community repos), a one-line note, and whether it is a reasoning
+# ("thinking") model. The size drives the per-machine "does this fit?" check
+# below — bigger models give better German summaries but need proportionally
+# more unified memory. ``thinks`` makes summarize() turn on the model's internal
+# reasoning pass (the <think> block is generated, then stripped from the output).
+ModelSpec = namedtuple("ModelSpec", "repo size_gb note thinks")
+ModelSpec.__new__.__defaults__ = (False,)  # thinks defaults to False
 
+# Current generation (June 2026): Qwen3.5 + Gemma 4. Qwen3.5 are hybrid models —
+# they reason step by step before answering, which produces noticeably better
+# structured German summaries; Gemma 4 has the strongest multilingual coverage.
 SUMMARY_MODELS = {
-    "qwen3-32b":     ModelSpec("mlx-community/Qwen3-32B-4bit", 18.4, "dense — top reasoning quality"),
-    "gemma3-27b":    ModelSpec("mlx-community/gemma-3-27b-it-4bit", 16.9, "dense — excellent German / 140+ languages"),
-    "qwen3-30b-a3b": ModelSpec("mlx-community/Qwen3-30B-A3B-4bit", 17.2, "MoE, ~3B active — fast + strong"),
-    "mistral-24b":   ModelSpec("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", 13.3, "solid all-rounder, lighter"),
-    "qwen3-14b":     ModelSpec("mlx-community/Qwen3-14B-4bit", 8.3, "balanced quality/speed"),
-    "qwen3-8b":      ModelSpec("mlx-community/Qwen3-8B-4bit", 4.6, "lightweight"),
-    "gemma3-4b":     ModelSpec("mlx-community/gemma-3-4b-it-4bit", 3.4, "minimal, 140+ languages"),
-    "qwen3-4b":      ModelSpec("mlx-community/Qwen3-4B-4bit", 2.3, "minimal, fastest"),
-    "qwen3-235b":    ModelSpec("mlx-community/Qwen3-235B-A22B-4bit", 132.3, "flagship MoE — needs a Mac Studio/Ultra"),
+    # --- Qwen3.5 (hybrid reasoning) -------------------------------------
+    "qwen3.5-397b":  ModelSpec("mlx-community/Qwen3.5-397B-A17B-4bit", 210.0, "flagship MoE — Mac Studio Ultra only", True),
+    "qwen3.5-122b":  ModelSpec("mlx-community/Qwen3.5-122B-A10B-MLX-4bit", 66.0, "large MoE — high-RAM Studio", True),
+    "qwen3.5-35b":   ModelSpec("mlx-community/Qwen3.5-35B-A3B-4bit", 19.6, "MoE, ~3B active — reasons + fast, best all-round", True),
+    "qwen3.5-27b":   ModelSpec("mlx-community/Qwen3.5-27B-4bit", 15.0, "dense — top reasoning quality", True),
+    "qwen3.5-9b":    ModelSpec("mlx-community/Qwen3.5-9B-4bit", 5.0, "balanced — reasons, fits 16 GB", True),
+    "qwen3.5-4b":    ModelSpec("mlx-community/Qwen3.5-4B-MLX-4bit", 2.4, "small reasoner — fast", True),
+    "qwen3.5-2b":    ModelSpec("mlx-community/Qwen3.5-2B-MLX-4bit", 1.3, "minimal — fastest", True),
+    # --- Gemma 4 (instruction, strongest multilingual) -----------------
+    "gemma4-26b":    ModelSpec("mlx-community/gemma-4-26b-a4b-it-4bit", 14.5, "MoE — excellent German / 140+ languages"),
+    "gemma4-12b":    ModelSpec("mlx-community/gemma-4-12B-4bit", 6.8, "dense — strong multilingual, lighter"),
+    "gemma4-e4b":    ModelSpec("mlx-community/gemma-4-e4b-it-4bit", 3.4, "minimal, 140+ languages"),
+    # --- Mistral (no newer 2026 release; solid all-rounder) ------------
+    "mistral-24b":   ModelSpec("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", 13.3, "solid all-rounder, no reasoning"),
+    # --- Legacy aliases: not shown in the menu, kept so an existing
+    #     config.summary_model still resolves to a real repo. -----------
+    "qwen3-32b":     ModelSpec("mlx-community/Qwen3-32B-4bit", 18.4, "legacy — Qwen3 dense"),
+    "gemma3-27b":    ModelSpec("mlx-community/gemma-3-27b-it-4bit", 16.9, "legacy — Gemma 3"),
+    "qwen3-30b-a3b": ModelSpec("mlx-community/Qwen3-30B-A3B-4bit", 17.2, "legacy — Qwen3 MoE"),
+    "qwen3-14b":     ModelSpec("mlx-community/Qwen3-14B-4bit", 8.3, "legacy — Qwen3"),
+    "qwen3-8b":      ModelSpec("mlx-community/Qwen3-8B-4bit", 4.6, "legacy — Qwen3"),
+    "gemma3-4b":     ModelSpec("mlx-community/gemma-3-4b-it-4bit", 3.4, "legacy — Gemma 3"),
+    "qwen3-4b":      ModelSpec("mlx-community/Qwen3-4B-4bit", 2.3, "legacy — Qwen3"),
+    "qwen3-235b":    ModelSpec("mlx-community/Qwen3-235B-A22B-4bit", 132.3, "legacy — Qwen3 flagship MoE"),
 }
 
 # Best → smallest. Used both for menu order and for picking the best model that
-# fits a given machine when summary_model is "auto".
+# fits a given machine when summary_model is "auto". Only current-generation
+# models appear here; legacy aliases above stay resolvable but off the menu.
 _BEST_FIRST = [
-    "qwen3-235b", "qwen3-32b", "gemma3-27b", "qwen3-30b-a3b",
-    "mistral-24b", "qwen3-14b", "qwen3-8b", "gemma3-4b", "qwen3-4b",
+    "qwen3.5-397b", "qwen3.5-122b", "qwen3.5-35b", "qwen3.5-27b",
+    "gemma4-26b", "mistral-24b", "gemma4-12b", "qwen3.5-9b",
+    "gemma4-e4b", "qwen3.5-4b", "qwen3.5-2b",
 ]
 
 # Fraction of total unified memory we treat as usable for model weights + the
@@ -362,6 +386,19 @@ def available() -> bool:
         return False
 
 
+def model_thinks(name: Optional[str]) -> bool:
+    """Whether a model (alias or 'auto') reasons before answering.
+
+    Unknown/custom repos are detected heuristically from the repo name so a
+    pasted "…-Thinking…" repo still gets a reasoning pass and token headroom.
+    """
+    alias = default_model() if (not name or name == "auto") else name
+    spec = SUMMARY_MODELS.get(alias)
+    if spec is not None:
+        return bool(spec.thinks)
+    return "think" in alias.lower()
+
+
 def resolve_model(name: Optional[str]) -> str:
     """Accept a friendly alias, ``"auto"``, or a full HF repo id.
 
@@ -444,29 +481,39 @@ def summarize(
     from mlx_lm import generate, load
 
     repo = resolve_model(model)
+    thinks = model_thinks(model)
     lm, tokenizer = load(repo)
     lang = language or ""
     system = _SYSTEM.get(lang, _SYSTEM["en"])
     instruction = (prompt or default_prompt(language)).strip()
     label = _TRANSCRIPT_LABEL.get(lang, "Transcript")
 
-    def _run(user: str, max_tokens: int = 900) -> str:
+    # Reasoning models spend tokens on a hidden <think> pass before the answer,
+    # so they need far more headroom — too small a budget and generation stops
+    # mid-thought, leaving an empty summary after stripping. Non-thinking models
+    # answer directly and stay tight.
+    answer_budget = 900
+    reduce_budget = 500
+    think_budget = 2200  # extra tokens reserved for the reasoning pass
+
+    def _run(user: str, max_tokens: int) -> str:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
         try:
             chat = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, enable_thinking=False
+                messages, add_generation_prompt=True, enable_thinking=thinks
             )
         except TypeError:
             chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-        out = generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens, verbose=False)
+        budget = max_tokens + (think_budget if thinks else 0)
+        out = generate(lm, tokenizer, prompt=chat, max_tokens=budget, verbose=False)
         return _strip_thinking(out)
 
     parts = _chunks(text)
     if len(parts) == 1:
-        return _run(f"{instruction}\n\n{label}:\n{parts[0]}")
+        return _run(f"{instruction}\n\n{label}:\n{parts[0]}", answer_budget)
 
     # Map-reduce for long meetings: summarize each chunk, then combine.
-    partials = [_run(f"{instruction}\n\n{label}:\n{p}", max_tokens=500) for p in parts]
+    partials = [_run(f"{instruction}\n\n{label}:\n{p}", reduce_budget) for p in parts]
     reduce_instr = _REDUCE.get(lang, _REDUCE["en"])
-    return _run(f"{reduce_instr}\n\n{chr(10).join(partials)}")
+    return _run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget)

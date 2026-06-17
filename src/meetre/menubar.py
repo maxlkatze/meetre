@@ -321,6 +321,19 @@ class MeetreApp(rumps.App if rumps else object):
         # A single main-thread timer reflects state into the menu bar.
         self._timer = rumps.Timer(self._tick, 0.5)
         self._timer.start()
+        # By default the NSTimer only fires in the default run-loop mode, so the
+        # moment the user opens the menu the loop switches to event-tracking mode
+        # and the title/spinner freeze and queued notifications stall until the
+        # menu closes. Registering the same timer for the common modes keeps it
+        # ticking while the menu is open.
+        try:
+            from Foundation import NSRunLoop, NSRunLoopCommonModes
+
+            nstimer = getattr(self._timer, "_nstimer", None)
+            if nstimer is not None:
+                NSRunLoop.currentRunLoop().addTimer_forMode_(nstimer, NSRunLoopCommonModes)
+        except Exception:  # noqa: BLE001
+            pass
         # Check for updates (git pull) in the background on every launch.
         threading.Thread(target=self._do_update, daemon=True).start()
 
