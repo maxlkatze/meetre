@@ -113,18 +113,34 @@ def _markdown_to_note_html(md: str) -> str:
     return "\n".join(html_lines)
 
 
+def note_title(meeting_title: str, when=None) -> str:
+    """Apple Notes title in the form ``MEETRE>{meeting title}-{YYYY-MM-DD}``.
+
+    ``when`` may be a datetime, a date string, or None (date omitted).
+    """
+    base = (meeting_title or "Meeting").strip()
+    date = ""
+    if when is not None:
+        date = when.strftime("%Y-%m-%d") if hasattr(when, "strftime") else str(when).strip()
+    return f"MEETRE>{base}-{date}" if date else f"MEETRE>{base}"
+
+
 def add_to_apple_notes(
     title: str,
     transcript_md: str,
     summary_md: Optional[str] = None,
     folder: Optional[str] = None,
+    when=None,
 ) -> None:
     """Create a note containing an optional summary plus the full transcript.
 
+    The note title is ``MEETRE>{title}-{date}``. Apple Notes derives the shown
+    title from the first line of the body, so that line carries the same text.
     Uses AppleScript (the first run prompts for Automation permission). When
     ``summary_md`` is None, a placeholder "Summary" section is added for you to
     paste Claude Desktop's reply into.
     """
+    title = note_title(title, when)
     parts = [f"# {title}", ""]
     if summary_md and summary_md.strip():
         # The summary already carries its own section headings — don't wrap it

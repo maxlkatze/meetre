@@ -144,7 +144,8 @@ def _transcribe_and_write(
 
         try:
             integrations.add_to_apple_notes(
-                path.stem, _segments_to_text(segments), summary_md=summary or None)
+                title, _segments_to_text(segments), summary_md=summary or None,
+                when=started)
             ui.ok("Saved to Apple Notes")
         except RuntimeError as e:
             ui.warn(f"Apple Notes: {e}")
@@ -432,9 +433,10 @@ def do_summarize(cfg: Config, file: Optional[str] = None, notes: bool = True) ->
     if path is None or not path.exists():
         ui.error("No transcript found to summarize.")
         return
-    title = path.stem
     raw = path.read_text()
     body = summarizer.transcript_body(raw)
+    mtitle, when = summarizer.meeting_meta(raw)
+    title = mtitle or path.stem
 
     # Reuse the summary already embedded in the transcript if present.
     summary = summarizer.extract_summary(raw)
@@ -457,7 +459,7 @@ def do_summarize(cfg: Config, file: Optional[str] = None, notes: bool = True) ->
         return
 
     try:
-        integrations.add_to_apple_notes(title, body, summary_md=summary or None)
+        integrations.add_to_apple_notes(title, body, summary_md=summary or None, when=when)
         ui.ok("Saved to Apple Notes (summary + transcript)")
     except RuntimeError as e:
         ui.error(str(e))

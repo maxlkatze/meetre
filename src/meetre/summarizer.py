@@ -461,6 +461,23 @@ def _chunks(text: str, size: int = _CHUNK_CHARS) -> List[str]:
     return out
 
 
+def meeting_meta(md: str) -> Tuple[Optional[str], Optional[str]]:
+    """(meeting title, date 'YYYY-MM-DD') from a transcript .md header.
+
+    write_transcript writes ``# {title}`` then ``- **Date:** YYYY-MM-DD HH:MM:SS``.
+    Either value is None if not found.
+    """
+    title = date = None
+    for line in md.splitlines():
+        if title is None and line.startswith("# "):
+            title = line[2:].strip()
+        elif date is None and "**Date:**" in line:
+            date = line.split("**Date:**", 1)[1].strip()[:10]
+        if title and date:
+            break
+    return title, date
+
+
 def transcript_body(md: str) -> str:
     """Extract just the spoken content from a transcript .md (drop metadata
     and any existing summary section)."""

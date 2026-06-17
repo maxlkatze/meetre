@@ -796,8 +796,8 @@ class MeetreApp(rumps.App if rumps else object):
                 self._stage("Saving to Apple Notes…")
                 try:
                     integrations.add_to_apple_notes(
-                        path.stem, summarizer.transcript_body(path.read_text()),
-                        summary_md=summary or None)
+                        title, summarizer.transcript_body(path.read_text()),
+                        summary_md=summary or None, when=started)
                     self._notify("meetre", "Apple Notes", "Saved summary + transcript.")
                 except RuntimeError as e:
                     self._notify("meetre", "Apple Notes failed", str(e))
@@ -864,8 +864,11 @@ class MeetreApp(rumps.App if rumps else object):
         from . import integrations, summarizer
 
         md = path.read_text()
-        title = path.stem
         body = summarizer.transcript_body(md)
+        # Recover the meeting title + date from the transcript metadata so the
+        # Apple Note gets "MEETRE>{title}-{date}" rather than the filename stem.
+        mtitle, when = summarizer.meeting_meta(md)
+        title = mtitle or path.stem
 
         # Reuse the summary already embedded in the transcript if present.
         summary = summarizer.extract_summary(md)
@@ -883,7 +886,7 @@ class MeetreApp(rumps.App if rumps else object):
 
         self._stage("Saving to Apple Notes…")
         try:
-            integrations.add_to_apple_notes(title, body, summary_md=summary or None)
+            integrations.add_to_apple_notes(title, body, summary_md=summary or None, when=when)
             self._notify("meetre", "Apple Notes",
                          "Saved summary + transcript." if summary
                          else "Saved transcript (no summary).")
