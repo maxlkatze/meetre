@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meetre"
-version = "0.1.0"
+version = "0.2.0"
 description = "Record macOS audio and turn meetings into transcripts with speaker association."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 authors = [{ name = "Agendaro" }]
 dependencies = [
     "rich>=13.0",
@@ -16,8 +16,10 @@ dependencies = [
     "soundfile>=0.12",
     # Apple Silicon: Metal-accelerated transcription via MLX.
     "mlx-whisper>=0.4.0",
-    # Local LLM summarization (Qwen3-8B-4bit etc.) via MLX.
-    "mlx-lm>=0.20.0",
+    # Local LLM summarization via MLX. 0.31.3+ adds the gemma4 + qwen3.5
+    # architectures used by the current summary-model lineup; older mlx-lm
+    # fails to load those repos with "Model type gemma4 not supported".
+    "mlx-lm>=0.31.3",
 ]
 
 [project.optional-dependencies]

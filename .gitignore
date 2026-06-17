@@ -7,6 +7,7 @@ crashlogs/
 
 # Local Python environment & runtimes
 .venv/
+.venv.old/
 .runtime/
 
 # Build / packaging

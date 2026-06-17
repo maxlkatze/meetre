@@ -2,7 +2,7 @@
 #
 # meetre installer for macOS — no admin required.
 #
-#   * uses your existing python3 / git if present (>= 3.9),
+#   * uses your existing python3 / git if present (>= 3.11),
 #   * otherwise downloads a LOCAL, relocatable Python into .runtime/ (no sudo),
 #   * creates a venv and installs meetre + the menu-bar app,
 #   * registers a login startup item (LaunchAgent) and launches the menu bar.
@@ -48,11 +48,15 @@ case "$ROOT/" in
     ;;
 esac
 
-# --- 1. Python (>= 3.9) -----------------------------------------------------
+# --- 1. Python (>= 3.11) ----------------------------------------------------
+# meetre needs Python >= 3.11 (mlx-lm 0.31.3+ and the current model lineup).
+# If no recent enough python3 is on PATH we fetch a local, relocatable CPython.
+PY_SERIES="3.12"   # version of the auto-downloaded local Python
+
 find_python() {
-  for c in python3.12 python3.11 python3.10 python3; do
+  for c in python3.13 python3.12 python3.11 python3; do
     if command -v "$c" >/dev/null 2>&1; then
-      if "$c" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3,9) else 1)' 2>/dev/null; then
+      if "$c" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3,11) else 1)' 2>/dev/null; then
         command -v "$c"; return 0
       fi
     fi
@@ -61,10 +65,17 @@ find_python() {
 }
 
 install_local_python() {
-  info "No suitable python3 found — downloading a local Python (no admin)…"
+  info "No suitable python3 (>= 3.11) found — downloading a local Python ${PY_SERIES} (no admin)…"
   local api url tarball
   api="https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
+  # Pick the newest CPython ${PY_SERIES}.x install_only build for this arch.
   url="$(curl -fsSL "$api" \
+        | grep browser_download_url \
+        | grep "cpython-${PY_SERIES}\." \
+        | grep "${ARCH}-apple-darwin-install_only.tar.gz" \
+        | grep -v '\.sha256' | head -1 | cut -d'"' -f4)"
+  # Fall back to whatever install_only build is newest if the series isn't found.
+  [ -n "$url" ] || url="$(curl -fsSL "$api" \
         | grep browser_download_url \
         | grep "${ARCH}-apple-darwin-install_only.tar.gz" \
         | grep -v '\.sha256' | head -1 | cut -d'"' -f4)"
