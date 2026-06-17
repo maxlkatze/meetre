@@ -384,7 +384,7 @@ class MeetreApp(rumps.App if rumps else object):
         self._rec_meta = None        # (title, started, tmp_wav)
         self._settings_ctrl = None   # keep the settings window alive
         self._stage_text = None      # current processing stage label
-        self._download = None        # (label, fraction) while downloading
+        self._download = None        # (icon, label, fraction) while a bar is active
         self._spin = 0               # spinner frame counter
         self._notify_queue = []      # (title, subtitle, msg) from worker threads
 
@@ -702,21 +702,22 @@ class MeetreApp(rumps.App if rumps else object):
         self._download = None
         self._stage_text = text
 
-    def _progress(self, label, frac):
+    def _progress(self, label, frac, icon="🔍"):
         """Progress callback for transcriber/diarizer hooks.
 
-        ``frac`` None → just a stage label (indeterminate); a number → a bar.
-        Safe to call from the worker thread; the main-thread timer renders it.
+        ``frac`` None → just a stage label (indeterminate); a number → a bar
+        prefixed with ``icon`` (🔍 for speaker analysis by default). Safe to call
+        from the worker thread; the main-thread timer renders it.
         """
         if frac is None:
             self._download = None
             self._stage_text = label
         else:
-            self._download = (label, max(0.0, min(1.0, frac)))
+            self._download = (icon, label, max(0.0, min(1.0, frac)))
 
     def _tx_progress(self, done, total):
         """Adapter: transcription reports (seconds_done, total_seconds)."""
-        self._progress("Transcribing", (done / total) if total else None)
+        self._progress("Transcribing", (done / total) if total else None, icon="✏️")
 
     def _ensure_model(self, repo, label):
         """Download a model if needed, streaming progress to the menu bar."""
@@ -726,7 +727,7 @@ class MeetreApp(rumps.App if rumps else object):
             return
 
         def cb(frac, done, total):
-            self._download = (label, frac)
+            self._download = ("⬇", label, frac)
 
         try:
             downloads.ensure_model(repo, cb)
@@ -1026,10 +1027,10 @@ class MeetreApp(rumps.App if rumps else object):
             if self._download is not None:
                 from .downloads import bar
 
-                label, frac = self._download
+                icon, label, frac = self._download
                 pct = int(frac * 100)
-                self.title = f"⬇ {pct}%"
-                self._set_status(f"⬇ {label}  {bar(frac)} {pct}%")
+                self.title = f"{icon} {pct}%"
+                self._set_status(f"{icon} {label}  {bar(frac)} {pct}%")
             else:
                 star = SPINNER[self._spin]
                 stage = self._stage_text or "Working…"
