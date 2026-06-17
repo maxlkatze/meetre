@@ -7,15 +7,192 @@ MLX runtime (same stack as transcription, no extra server needed).
 
 from __future__ import annotations
 
+import os
 import re
-from typing import List, Optional
+import shutil
+import stat as _stat
+import subprocess
+from collections import namedtuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# Recommended local models, all ≤5 GB at 4-bit. First that loads wins as default.
+# A summary model: HF repo, approximate 4-bit weight size in GB (measured from
+# the mlx-community repos), and a one-line note. The size drives the per-machine
+# "does this fit?" check below — bigger models give better German summaries but
+# need proportionally more unified memory.
+ModelSpec = namedtuple("ModelSpec", "repo size_gb note")
+
 SUMMARY_MODELS = {
-    "qwen3-8b": "mlx-community/Qwen3-8B-4bit",        # ~4.7 GB, best quality
-    "qwen3-4b": "mlx-community/Qwen3-4B-4bit",        # ~2.5 GB, faster
-    "gemma3-4b": "mlx-community/gemma-3-4b-it-4bit",  # ~2.6 GB, 140+ languages
+    "qwen3-32b":     ModelSpec("mlx-community/Qwen3-32B-4bit", 18.4, "dense — top reasoning quality"),
+    "gemma3-27b":    ModelSpec("mlx-community/gemma-3-27b-it-4bit", 16.9, "dense — excellent German / 140+ languages"),
+    "qwen3-30b-a3b": ModelSpec("mlx-community/Qwen3-30B-A3B-4bit", 17.2, "MoE, ~3B active — fast + strong"),
+    "mistral-24b":   ModelSpec("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", 13.3, "solid all-rounder, lighter"),
+    "qwen3-14b":     ModelSpec("mlx-community/Qwen3-14B-4bit", 8.3, "balanced quality/speed"),
+    "qwen3-8b":      ModelSpec("mlx-community/Qwen3-8B-4bit", 4.6, "lightweight"),
+    "gemma3-4b":     ModelSpec("mlx-community/gemma-3-4b-it-4bit", 3.4, "minimal, 140+ languages"),
+    "qwen3-4b":      ModelSpec("mlx-community/Qwen3-4B-4bit", 2.3, "minimal, fastest"),
+    "qwen3-235b":    ModelSpec("mlx-community/Qwen3-235B-A22B-4bit", 132.3, "flagship MoE — needs a Mac Studio/Ultra"),
 }
+
+# Best → smallest. Used both for menu order and for picking the best model that
+# fits a given machine when summary_model is "auto".
+_BEST_FIRST = [
+    "qwen3-235b", "qwen3-32b", "gemma3-27b", "qwen3-30b-a3b",
+    "mistral-24b", "qwen3-14b", "qwen3-8b", "gemma3-4b", "qwen3-4b",
+]
+
+# Fraction of total unified memory we treat as usable for model weights + the
+# KV cache, leaving the rest for the OS and other apps. Apple's GPU can wire
+# ~75% of RAM by default; 0.70 keeps a safety margin for long transcripts.
+_USABLE_FRACTION = 0.70
+
+
+def system_memory_gb() -> float:
+    """Total physical/unified RAM in GB for this machine (0.0 if unknown)."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2
+        )
+        return int(out.stdout.strip()) / (1024 ** 3)
+    except Exception:
+        return 0.0
+
+
+def model_budget_gb(total_gb: Optional[float] = None) -> float:
+    """How much memory we'll allow a summary model to occupy on this machine."""
+    total = system_memory_gb() if total_gb is None else total_gb
+    return max(0.0, total * _USABLE_FRACTION)
+
+
+def model_fits(name_or_spec, total_gb: Optional[float] = None) -> bool:
+    """Whether a model (alias or ModelSpec) is small enough to run here.
+
+    Unknown names (e.g. a custom HF repo) are assumed to fit — we can't size
+    them, so we don't block the user.
+    """
+    spec = name_or_spec if isinstance(name_or_spec, ModelSpec) else SUMMARY_MODELS.get(name_or_spec)
+    if spec is None:
+        return True
+    budget = model_budget_gb(total_gb)
+    return budget <= 0 or spec.size_gb <= budget
+
+
+def default_model(total_gb: Optional[float] = None) -> str:
+    """Best-quality model alias that fits this machine (machine-variable)."""
+    for alias in _BEST_FIRST:
+        if model_fits(alias, total_gb):
+            return alias
+    return "qwen3-4b"
+
+
+def model_catalog(total_gb: Optional[float] = None) -> List[Tuple[str, ModelSpec, bool]]:
+    """(alias, spec, fits) for every model, best→smallest, for pickers/menus."""
+    total = system_memory_gb() if total_gb is None else total_gb
+    return [(a, SUMMARY_MODELS[a], model_fits(a, total)) for a in _BEST_FIRST]
+
+
+# ---------------------------------------------------------------------------
+# Downloaded-model management (HuggingFace cache)
+# ---------------------------------------------------------------------------
+
+def hf_cache_dir() -> Path:
+    """The HuggingFace hub cache directory, honouring the usual env overrides."""
+    for env in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        v = os.environ.get(env)
+        if v:
+            return Path(v).expanduser()
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _repo_to_dirname(repo: str) -> str:
+    return "models--" + repo.replace("/", "--")
+
+
+def _dirname_to_repo(name: str) -> str:
+    return name[len("models--"):].replace("--", "/") if name.startswith("models--") else name
+
+
+def _dir_size(path: Path) -> int:
+    """On-disk bytes under ``path``. Counts real files (blobs) once; HF stores
+    snapshots as symlinks into ``blobs/``, so we skip symlinks to avoid double
+    counting."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            st = p.lstat()
+            if _stat.S_ISREG(st.st_mode):
+                total += st.st_size
+        except OSError:
+            pass
+    return total
+
+
+def _repo_for(name_or_repo: str) -> str:
+    """Resolve an alias/auto to its HF repo id; pass repo ids through."""
+    spec = SUMMARY_MODELS.get(name_or_repo)
+    if spec is not None:
+        return spec.repo
+    if not name_or_repo or name_or_repo == "auto":
+        return resolve_model("auto")
+    return name_or_repo
+
+
+def installed_size(name_or_repo: str) -> int:
+    """Bytes a model occupies in the cache, or 0 if not downloaded."""
+    p = hf_cache_dir() / _repo_to_dirname(_repo_for(name_or_repo))
+    return _dir_size(p) if p.is_dir() else 0
+
+
+def is_installed(name_or_repo: str) -> bool:
+    return (hf_cache_dir() / _repo_to_dirname(_repo_for(name_or_repo))).is_dir()
+
+
+def installed_models() -> List[Dict[str, object]]:
+    """Every model in the HF cache: ``{repo, alias, size, path}``, largest first.
+
+    Includes non-summary models (e.g. Whisper) so the user can reclaim space.
+    """
+    cache = hf_cache_dir()
+    if not cache.is_dir():
+        return []
+    repo_to_alias = {spec.repo: alias for alias, spec in SUMMARY_MODELS.items()}
+    out = []
+    for d in cache.glob("models--*"):
+        if not d.is_dir():
+            continue
+        repo = _dirname_to_repo(d.name)
+        out.append({
+            "repo": repo,
+            "alias": repo_to_alias.get(repo),
+            "size": _dir_size(d),
+            "path": d,
+        })
+    out.sort(key=lambda m: m["size"], reverse=True)
+    return out
+
+
+def uninstall_model(name_or_repo: str) -> int:
+    """Delete a model from the HF cache. Returns freed bytes (0 if absent)."""
+    repo = _repo_for(name_or_repo)
+    p = hf_cache_dir() / _repo_to_dirname(repo)
+    if not p.is_dir():
+        return 0
+    freed = _dir_size(p)
+    shutil.rmtree(p, ignore_errors=True)
+    return freed
+
+
+def human_size(num_bytes: float) -> str:
+    """Compact human-readable size, e.g. ``18.4 GB``."""
+    n = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
 
 # Roughly how many characters we feed per chunk before map-reduce kicks in.
 _CHUNK_CHARS = 24_000
@@ -31,9 +208,25 @@ _SYSTEM = {
 
 # The default, user-editable instruction (no transcript — that's appended).
 _DEFAULT_INSTRUCTION = {
-    "de": "Erstelle eine professionelle, strukturierte Zusammenfassung des "
-          "Meetings. Verwende überwiegend Stichpunkte.\n\n"
+    "de": "Erstelle eine konkrete, inhaltsreiche Zusammenfassung des Meetings. "
+          "Schreibe so, dass jemand, der nicht dabei war, den tatsächlichen "
+          "Inhalt versteht — nicht nur, DASS etwas besprochen wurde, sondern WAS "
+          "genau. Verwende überwiegend Stichpunkte.\n\n"
           "Regeln:\n"
+          "- Sei konkret. Nenne die tatsächlichen Inhalte: konkrete Probleme, "
+          "Argumente, Zahlen, Namen von Personen/Seiten/Objekten, Uhrzeiten und "
+          "Fristen aus dem Transkript. Lieber ein paar Stichpunkte mehr, dafür "
+          "mit Substanz.\n"
+          "- VERBOTEN sind leere Meta-Formulierungen wie „Diskussion über …“, "
+          "„Überlegungen zu …“, „Austausch über …“, „Erwähnung von …“. Schreibe "
+          "stattdessen, was konkret gesagt, kritisiert oder beschlossen wurde.\n"
+          "  Schlecht: „Diskussion über die Umsetzung von Designs und die "
+          "Herausforderungen bei der Konsistenz.“\n"
+          "  Gut: „Zu viele parallele Designvarianten und fehlende verbindliche "
+          "Figma-Vorlagen machen es schwer, Inhalte konsistent einzubauen.“\n"
+          "- Wenn das Gespräch ein zentrales Problem oder Spannungsfeld hat, "
+          "benenne es zuerst klar in 1–2 Sätzen, bevor du die Einzelpunkte "
+          "auflistest.\n"
           "- Erkenne ALLE Aufgaben, Verpflichtungen und Fristen — auch in "
           "Ich-Form (z. B. „ich muss/sollte/werde …“, „Abgabe“, „fertig werden "
           "bis …“) sowie konkrete Uhrzeiten und Termine. Trage jede davon unter "
@@ -57,17 +250,37 @@ _DEFAULT_INSTRUCTION = {
           "Abschnitt wirklich leer ist, schreibe „Keine“.\n\n"
           "Antworte in genau dieser Struktur:\n"
           "## Zusammenfassung\n"
-          "- 2–4 übergeordnete Stichpunkte zu Themen und Ergebnissen\n\n"
+          "- Beginne mit 1–2 Sätzen zum Kernthema bzw. Kernproblem des "
+          "Gesprächs.\n"
+          "- Dann konkrete Stichpunkte zu den wichtigsten besprochenen Punkten, "
+          "Problemen und Ergebnissen — jeweils mit Details, Namen und konkretem "
+          "Inhalt, nicht nur dem Thema.\n\n"
           "## Entscheidungen\n"
-          "- getroffene Entscheidungen (oder „Keine“)\n\n"
+          "- konkret getroffene Entscheidungen, jeweils mit dem Was und Warum "
+          "(oder „Keine“)\n\n"
           "## Aufgaben / To-dos\n"
           "- Aufgabe — verantwortliche Person (Sprecher-Label aus dem "
-          "Transkript), Frist (falls genannt)\n\n"
+          "Transkript), Frist (falls genannt). Beschreibe die Aufgabe konkret, "
+          "nicht als „Fortsetzung der Arbeit an …“.\n\n"
           "## Offene Fragen\n"
-          "- ungeklärte Punkte (oder „Keine“)",
-    "en": "Write a professional, structured summary of the meeting. Use mostly "
-          "bullet points.\n\n"
+          "- konkrete ungeklärte Punkte (oder „Keine“)",
+    "en": "Write a concrete, substantive summary of the meeting. Write so that "
+          "someone who was not there understands the actual content — not just "
+          "THAT something was discussed, but WHAT exactly. Use mostly bullet "
+          "points.\n\n"
           "Rules:\n"
+          "- Be concrete. Name the actual content: specific problems, arguments, "
+          "numbers, names of people/pages/objects, times and deadlines from the "
+          "transcript. A few extra bullets with substance beat fewer empty ones.\n"
+          "- FORBIDDEN are empty meta-phrasings like \"discussion about …\", "
+          "\"considerations regarding …\", \"exchange about …\", \"mention of …\". "
+          "Write instead what was concretely said, criticized or decided.\n"
+          "  Bad: \"Discussion about implementing designs and the challenges of "
+          "consistency.\"\n"
+          "  Good: \"Too many parallel design variants and missing binding Figma "
+          "templates make it hard to embed content consistently.\"\n"
+          "- If the conversation has a central problem or tension, state it "
+          "clearly in 1–2 sentences first, before listing the individual points.\n"
           "- Detect ALL tasks, commitments and deadlines — including "
           "first-person ones (e.g. \"I need to / should / will …\", \"due\", "
           "\"finish by …\") as well as specific times and dates. List each under "
@@ -88,24 +301,32 @@ _DEFAULT_INSTRUCTION = {
           "section is truly empty, write \"None\".\n\n"
           "Respond in exactly this structure:\n"
           "## Summary\n"
-          "- 2–4 high-level bullets on topics and outcomes\n\n"
+          "- Start with 1–2 sentences on the core topic or core problem of the "
+          "conversation.\n"
+          "- Then concrete bullets on the most important points, problems and "
+          "outcomes discussed — each with detail, names and actual content, not "
+          "just the topic.\n\n"
           "## Decisions\n"
-          "- decisions made (or \"None\")\n\n"
+          "- decisions actually made, each with the what and why (or \"None\")\n\n"
           "## Action items\n"
           "- task — owner (speaker label from the transcript), deadline (if "
-          "mentioned)\n\n"
+          "mentioned). Describe the task concretely, not as \"continue work on …\".\n\n"
           "## Open questions\n"
-          "- unresolved points (or \"None\")",
+          "- concrete unresolved points (or \"None\")",
 }
 
 _REDUCE = {
     "de": "Fasse die folgenden Teil-Zusammenfassungen zu einer einzigen, "
           "kohärenten Zusammenfassung auf Deutsch zusammen — überwiegend "
           "Stichpunkte, mit den Abschnitten Zusammenfassung, Entscheidungen, "
-          "Aufgaben / To-dos und Offene Fragen.",
+          "Aufgaben / To-dos und Offene Fragen. Behalte konkrete Details, Namen, "
+          "Zahlen und Fristen bei; verallgemeinere nicht zu leeren "
+          "Meta-Formulierungen („Diskussion über …“).",
     "en": "Combine the following partial summaries into one coherent summary — "
           "mostly bullets, with the sections Summary, Decisions, Action items "
-          "and Open questions.",
+          "and Open questions. Keep concrete details, names, numbers and "
+          "deadlines; do not generalize into empty meta-phrasings "
+          "(\"discussion about …\").",
 }
 
 _TRANSCRIPT_LABEL = {"de": "Transkript", "en": "Transcript"}
@@ -126,10 +347,16 @@ def available() -> bool:
 
 
 def resolve_model(name: Optional[str]) -> str:
-    """Accept a friendly alias or a full HF repo id."""
-    if not name:
-        return SUMMARY_MODELS["qwen3-8b"]
-    return SUMMARY_MODELS.get(name, name)
+    """Accept a friendly alias, ``"auto"``, or a full HF repo id.
+
+    ``"auto"`` (or an empty value) resolves to the best model that fits this
+    machine, so the same config behaves sensibly on a 16 GB laptop and a 64 GB
+    Studio alike.
+    """
+    if not name or name == "auto":
+        name = default_model()
+    spec = SUMMARY_MODELS.get(name)
+    return spec.repo if spec is not None else name
 
 
 def _strip_thinking(text: str) -> str:

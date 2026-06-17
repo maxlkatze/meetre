@@ -53,8 +53,10 @@ class Config:
     hf_token: Optional[str] = None
     # Compute type for faster-whisper ("int8" is fast & light on CPU).
     compute_type: str = "int8"
-    # Local LLM summarization. Alias (qwen3-8b/qwen3-4b/gemma3-4b) or HF repo id.
-    summary_model: str = "qwen3-8b"
+    # Local LLM summarization. "auto" picks the best model that fits this
+    # machine's RAM; or pin an alias (e.g. qwen3-32b/gemma3-27b/qwen3-8b) or a
+    # full HF repo id. See meetre.summarizer.SUMMARY_MODELS.
+    summary_model: str = "auto"
     # Generate a summary section automatically after each transcription.
     auto_summarize: bool = True
     # Automatically save the summary + transcript to Apple Notes after recording.

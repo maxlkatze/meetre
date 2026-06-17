@@ -31,13 +31,24 @@ from .config import MODELS, Config
 # Languages offered in the picker; None = auto-detect.
 LANGUAGES = [("Deutsch", "de"), ("English", "en"), ("Auto-detect", None)]
 
-# Summary-model choices; value None means "no summary" (transcript only).
-SUMMARY_CHOICES = [
-    ("Qwen3-8B (best, ~4.7 GB)", "qwen3-8b"),
-    ("Qwen3-4B (~2.5 GB)", "qwen3-4b"),
-    ("Gemma3-4B (~2.6 GB)", "gemma3-4b"),
-    ("Off — transcript only (no summary)", None),
-]
+def summary_choices():
+    """Build the summary-model dropdown for THIS machine.
+
+    Returns a list of ``(title, value, fits)``. ``value`` is a model alias,
+    ``"auto"``, or None (= no summary). ``fits`` is False for models too large
+    for the detected RAM — those are shown but grayed out / unselectable.
+    """
+    from . import summarizer
+
+    total = summarizer.system_memory_gb()
+    auto_alias = summarizer.default_model(total)
+    items = [(f"Auto — best that fits ({auto_alias}, ~{summarizer.SUMMARY_MODELS[auto_alias].size_gb:.0f} GB)",
+              "auto", True)]
+    for alias, spec, fits in summarizer.model_catalog(total):
+        suffix = "" if fits else " — needs more RAM"
+        items.append((f"{alias}  (~{spec.size_gb:.0f} GB){suffix}", alias, fits))
+    items.append(("Off — transcript only (no summary)", None, True))
+    return items
 
 # Idle icon: an AI sparkle. The spinner twinkles while working.
 IDLE_TITLE = "✦"
@@ -165,13 +176,20 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
             lang_pop.selectItemAtIndex_(i)
     content.addSubview_(lang_pop)
 
-    # Summary model picker (last entry disables summaries entirely).
+    # Summary model picker. Sized for THIS machine: models too big for the
+    # detected RAM are listed but grayed out. Last entry disables summaries.
+    summary_items = summary_choices()
     label("Summary model", next_y(38))
     summary_pop = NSPopUpButton.alloc().initWithFrame_pullsDown_(
         NSMakeRect(PAD, next_y(28), W - 2 * PAD, 26), False)
-    summary_pop.addItemsWithTitles_([name for name, _ in SUMMARY_CHOICES])
+    # Manage item enabled-state ourselves so we can gray out models that don't fit.
+    summary_pop.menu().setAutoenablesItems_(False)
     cur_summary = None if not cfg.auto_summarize else cfg.summary_model
-    for i, (_, val) in enumerate(SUMMARY_CHOICES):
+    for i, (title, val, fits) in enumerate(summary_items):
+        summary_pop.addItemWithTitle_(title)
+        item = summary_pop.itemAtIndex_(i)
+        # Keep the currently-saved choice selectable even if it no longer fits.
+        item.setEnabled_(bool(fits) or val == cur_summary)
         if val == cur_summary:
             summary_pop.selectItemAtIndex_(i)
     content.addSubview_(summary_pop)
@@ -227,7 +245,7 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
             "name": (name_field.stringValue() if name_field else "") or None,
             "model": model_pop.titleOfSelectedItem(),
             "language": LANGUAGES[lang_pop.indexOfSelectedItem()][1],
-            "summary_model": SUMMARY_CHOICES[summary_pop.indexOfSelectedItem()][1],
+            "summary_model": summary_items[summary_pop.indexOfSelectedItem()][1],
             "capture_system": bool(sysaudio_cb.state()),
             "person_detection": bool(persons_cb.state()),
             "summarize_after": bool(summarize_cb.state()),
@@ -285,7 +303,10 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
 
 class MeetreApp(rumps.App if rumps else object):
     def __init__(self):
-        super().__init__("meetre", title=IDLE_TITLE, quit_button="Quit meetre")
+        # quit_button=None: we add our own Quit item in _build_menu so it keeps
+        # a stable position after every menu rebuild (rumps' auto button can
+        # otherwise duplicate or jump).
+        super().__init__("meetre", title=IDLE_TITLE, quit_button=None)
         self.cfg = Config.load()
         self.state = "idle"          # idle | recording | processing
         self._recorder = None
@@ -306,6 +327,8 @@ class MeetreApp(rumps.App if rumps else object):
     # -- menu construction --------------------------------------------------
 
     def _build_menu(self):
+        from . import summarizer
+
         self.menu.clear()
         # Informational status line (disabled item) updated by the timer.
         self.status_item = rumps.MenuItem("✦ Ready")
@@ -332,6 +355,46 @@ class MeetreApp(rumps.App if rumps else object):
             it.state = 1 if (self.cfg.num_speakers or 0) == num else 0
             spk_menu.add(it)
 
+        # Summary-model submenu — sized for this machine; too-big models are
+        # listed but disabled (grayed). ✓ marks models already downloaded.
+        summary_menu = rumps.MenuItem("Summary model")
+        auto_alias = summarizer.default_model()
+        auto_it = rumps.MenuItem(f"Auto — best that fits ({auto_alias})",
+                                 callback=self._make_summary_cb("auto"))
+        auto_it.state = 1 if (self.cfg.auto_summarize and self.cfg.summary_model == "auto") else 0
+        summary_menu.add(auto_it)
+        for alias, spec, fits in summarizer.model_catalog():
+            inst = " ✓" if summarizer.is_installed(alias) else ""
+            if fits:
+                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){inst}",
+                                    callback=self._make_summary_cb(alias))
+            else:
+                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB) — needs more RAM")
+                it.set_callback(None)  # disabled / grayed out
+            it.state = 1 if (self.cfg.auto_summarize and self.cfg.summary_model == alias) else 0
+            summary_menu.add(it)
+        off_it = rumps.MenuItem("Off — transcript only", callback=self._make_summary_cb(None))
+        off_it.state = 1 if not self.cfg.auto_summarize else 0
+        summary_menu.add(off_it)
+
+        # Downloaded-models submenu — click a model to uninstall and free space.
+        downloads_menu = rumps.MenuItem("Downloaded models")
+        installed = summarizer.installed_models()
+        if not installed:
+            empty = rumps.MenuItem("(none downloaded yet)")
+            empty.set_callback(None)
+            downloads_menu.add(empty)
+        else:
+            for m in installed:
+                it = rumps.MenuItem(f"{m['repo']} — {summarizer.human_size(m['size'])}  ⌫",
+                                    callback=self._make_uninstall_cb(m["repo"], m["size"]))
+                downloads_menu.add(it)
+            downloads_menu.add(None)
+            total = sum(m["size"] for m in installed)
+            tot = rumps.MenuItem(f"Total: {summarizer.human_size(total)}")
+            tot.set_callback(None)
+            downloads_menu.add(tot)
+
         self.sysaudio_item = rumps.MenuItem("System audio (ScreenCaptureKit)",
                                             callback=self.on_toggle_sysaudio)
         self.sysaudio_item.state = 1 if self.cfg.capture_system else 0
@@ -346,6 +409,7 @@ class MeetreApp(rumps.App if rumps else object):
             None,
             model_menu,
             lang_menu,
+            summary_menu,
             spk_menu,
             self.sysaudio_item,
             self.persons_item,
@@ -353,6 +417,7 @@ class MeetreApp(rumps.App if rumps else object):
             rumps.MenuItem("Settings…", callback=self.on_settings),
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
             rumps.MenuItem("Open transcripts folder", callback=self.on_open_folder),
+            downloads_menu,
             None,
             rumps.MenuItem("Check for updates", callback=self.on_update),
         ]
@@ -361,6 +426,8 @@ class MeetreApp(rumps.App if rumps else object):
         self.startup_item = rumps.MenuItem("Start at login", callback=self.on_toggle_startup)
         self.startup_item.state = 1 if autostart.is_enabled() else 0
         self.menu.add(self.startup_item)
+        self.menu.add(None)
+        self.menu.add(rumps.MenuItem("Quit meetre", callback=rumps.quit_application))
 
     # -- picker callbacks ---------------------------------------------------
 
@@ -377,6 +444,34 @@ class MeetreApp(rumps.App if rumps else object):
             self.cfg.language = code
             self.cfg.save()
             self._build_menu()
+        return cb
+
+    def _make_summary_cb(self, value):
+        """value: model alias, 'auto', or None (= disable summaries)."""
+        def cb(sender):
+            if value is None:
+                self.cfg.auto_summarize = False
+            else:
+                self.cfg.auto_summarize = True
+                self.cfg.summary_model = value
+            self.cfg.save()
+            self._build_menu()
+        return cb
+
+    def _make_uninstall_cb(self, repo, size):
+        def cb(sender):
+            from . import summarizer
+
+            if rumps.alert(
+                title="Uninstall model?",
+                message=f"Delete {repo} and free {summarizer.human_size(size)}?\n"
+                        "It will be re-downloaded automatically if needed again.",
+                ok="Delete", cancel="Cancel",
+            ) == 1:
+                freed = summarizer.uninstall_model(repo)
+                self._build_menu()
+                rumps.notification("meetre", "Model removed",
+                                   f"Freed {summarizer.human_size(freed)} — {repo}")
         return cb
 
     def _make_spk_cb(self, num):

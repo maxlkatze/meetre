@@ -485,6 +485,130 @@ def do_model(cfg: Config, size: Optional[str] = None) -> None:
     ui.ok(f"Model set to {size}")
 
 
+def do_summary_model(cfg: Config, choice: Optional[str] = None) -> None:
+    """Pick the local summary model, showing sizes and what fits this Mac."""
+    from rich.table import Table
+
+    from . import summarizer
+
+    total = summarizer.system_memory_gb()
+    budget = summarizer.model_budget_gb(total)
+    catalog = summarizer.model_catalog(total)
+    auto_alias = summarizer.default_model(total)
+
+    t = Table(
+        title=f"Summary models — {total:.0f} GB RAM detected "
+              f"(~{budget:.0f} GB usable for a model)",
+        border_style="cyan",
+    )
+    t.add_column("Key", style="bold")
+    t.add_column("Size", justify="right")
+    t.add_column("On disk", justify="right")
+    t.add_column("Notes")
+    t.add_column("Status")
+    cur = None if not cfg.auto_summarize else cfg.summary_model
+    for alias, spec, fits in catalog:
+        mark = "→ " if alias == cur else "  "
+        disk = f"[green]✓ {summarizer.human_size(summarizer.installed_size(alias))}[/green]" \
+            if summarizer.is_installed(alias) else "[dim]—[/dim]"
+        if fits:
+            status = "[green]runs[/green]" + ("  [cyan](auto pick)[/cyan]" if alias == auto_alias else "")
+            style = None
+        else:
+            status = "[red]too large for this Mac[/red]"
+            style = "dim"
+        t.add_row(f"{mark}{alias}", f"{spec.size_gb:.1f} GB", disk, spec.note, status, style=style)
+    t.add_row("  auto", "—", "—", "best model that fits this machine", "[green]recommended[/green]")
+    t.add_row("  off", "—", "—", "transcript only, no summary", "")
+    ui.console.print(t)
+    ui.console.print("[dim]Tip: 'meetre models' lists downloads and frees disk space.[/dim]")
+
+    fitting = [a for a, _, fits in catalog if fits]
+    if choice is None:
+        choice = Prompt.ask(
+            "Select summary model",
+            choices=fitting + ["auto", "off"],
+            default="auto",
+        ).strip().lower()
+
+    if choice == "off":
+        cfg.auto_summarize = False
+        cfg.save()
+        ui.ok("Summaries disabled (transcript only)")
+        return
+    if choice != "auto" and choice not in SUMMARY_MODELS_KEYS():
+        # Allow a raw HF repo id too, but warn if we can't size-check it.
+        if "/" not in choice:
+            ui.error(f"Unknown model '{choice}'.")
+            return
+    if choice != "auto" and choice in SUMMARY_MODELS_KEYS() and not summarizer.model_fits(choice, total):
+        ui.warn(f"'{choice}' likely needs more RAM than this Mac has — it may swap or fail to load.")
+    cfg.summary_model = choice
+    cfg.auto_summarize = True
+    cfg.save()
+    resolved = summarizer.resolve_model(choice)
+    ui.ok(f"Summary model set to {choice} ({resolved})")
+
+
+def SUMMARY_MODELS_KEYS():
+    from . import summarizer
+
+    return set(summarizer.SUMMARY_MODELS)
+
+
+def do_models(cfg: Config, target: Optional[str] = None) -> None:
+    """List downloaded models and free disk space by uninstalling them."""
+    from rich.table import Table
+
+    from . import summarizer
+
+    installed = summarizer.installed_models()
+    if not installed:
+        ui.console.print("[dim]No models downloaded yet.[/dim]")
+        return
+
+    if target is None:
+        t = Table(title=f"Downloaded models — cache: {summarizer.hf_cache_dir()}",
+                  border_style="cyan")
+        t.add_column("#", justify="right", style="bold")
+        t.add_column("Model")
+        t.add_column("Size", justify="right")
+        t.add_column("Type")
+        total = 0
+        for i, m in enumerate(installed, 1):
+            total += m["size"]
+            kind = f"summary ({m['alias']})" if m["alias"] else \
+                ("whisper" if "whisper" in m["repo"].lower() else "other")
+            t.add_row(str(i), m["repo"], summarizer.human_size(m["size"]), kind)
+        t.add_row("", "[bold]Total[/bold]", f"[bold]{summarizer.human_size(total)}[/bold]", "")
+        ui.console.print(t)
+        target = Prompt.ask(
+            "Uninstall which? (number, alias, repo, or blank to cancel)", default=""
+        ).strip()
+        if not target:
+            return
+
+    # Resolve a chosen number to its repo.
+    if target.isdigit():
+        idx = int(target) - 1
+        if not (0 <= idx < len(installed)):
+            ui.error(f"No model #{target}.")
+            return
+        repo = installed[idx]["repo"]
+    else:
+        repo = summarizer._repo_for(target)
+        if not summarizer.is_installed(repo):
+            ui.error(f"'{target}' is not downloaded.")
+            return
+
+    size = summarizer.human_size(summarizer.installed_size(repo))
+    if not Confirm.ask(f"Delete [bold]{repo}[/bold] and free {size}?", default=False):
+        ui.console.print("[dim]cancelled[/dim]")
+        return
+    freed = summarizer.uninstall_model(repo)
+    ui.ok(f"Removed {repo} — freed {summarizer.human_size(freed)}")
+
+
 def do_persons(cfg: Config, value: Optional[str] = None) -> None:
     if value is None:
         cfg.person_detection = not cfg.person_detection
@@ -602,6 +726,8 @@ MENU = [
     ("o", "Open transcripts folder", "open"),
     ("d", "Show audio devices", "devices"),
     ("m", "Select model", "model"),
+    ("g", "Select summary model (shows sizes / what fits)", "summary-model"),
+    ("x", "Manage downloaded models (free disk space)", "models"),
     ("p", "Toggle person detection", "persons"),
     ("s", "Set speaker count (auto / 4 / 3-6)", "speakers"),
     ("c", "Edit configuration", "config"),
@@ -649,6 +775,10 @@ def interactive(cfg: Config) -> None:
             do_devices(cfg)
         elif action == "model":
             do_model(cfg)
+        elif action == "summary-model":
+            do_summary_model(cfg)
+        elif action == "models":
+            do_models(cfg)
         elif action == "persons":
             do_persons(cfg)
         elif action == "speakers":
@@ -701,6 +831,12 @@ def build_parser() -> argparse.ArgumentParser:
     pm = sub.add_parser("model", help="Select transcription model")
     pm.add_argument("size", nargs="?", choices=MODELS)
 
+    pg = sub.add_parser("summary-model", help="Select summary model (shows sizes / what fits)")
+    pg.add_argument("choice", nargs="?", help="alias (e.g. qwen3-32b), 'auto', 'off', or HF repo id")
+
+    px = sub.add_parser("models", help="List downloaded models / uninstall to free space")
+    px.add_argument("target", nargs="?", help="number, alias, or repo to uninstall")
+
     pp = sub.add_parser("persons", help="Toggle person detection")
     pp.add_argument("value", nargs="?", choices=["on", "off"])
 
@@ -743,6 +879,10 @@ def main(argv: Optional[list] = None) -> int:
             do_devices(cfg)
         elif args.command == "model":
             do_model(cfg, args.size)
+        elif args.command == "summary-model":
+            do_summary_model(cfg, args.choice)
+        elif args.command == "models":
+            do_models(cfg, args.target)
         elif args.command == "persons":
             do_persons(cfg, args.value)
         elif args.command == "speakers":
