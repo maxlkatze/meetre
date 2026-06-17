@@ -150,6 +150,107 @@ def _transcribe_faster(audio_path, model, language, compute_type, progress) -> L
     return out
 
 
+def _labels(language: Optional[str]) -> dict:
+    """Speaker label vocabulary for a language.
+
+    ``local``/``remote`` are used when a side has a single speaker;
+    ``local_multi``/``remote_multi`` are numbered when a side has several.
+    """
+    if language == "de":
+        return {"local": "Ich", "local_multi": "Vor Ort",
+                "remote": "Sprecher", "remote_multi": "Sprecher"}
+    return {"local": "Me", "local_multi": "Local",
+            "remote": "Speaker", "remote_multi": "Speaker"}
+
+
+def _rms(arr) -> float:
+    import numpy as np
+
+    return float(np.sqrt(np.mean(arr * arr))) if len(arr) else 0.0
+
+
+def transcribe_attributed(
+    mix_path: Path,
+    stems: dict,
+    model: str = "base",
+    language: Optional[str] = None,
+    compute_type: str = "int8",
+    detect_speakers: bool = False,
+    hf_token: Optional[str] = None,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> Tuple[List[Segment], str]:
+    """Transcribe the mixed audio once, then attribute speakers from the stems.
+
+    Timing comes from a single transcription of the mix (one clean timeline).
+    Each segment is attributed to a side by comparing energy in the mic stem
+    (you) vs the system stem (remote) over the segment window — the stems are
+    sample-aligned with the mix. With ``detect_speakers``, pyannote runs on each
+    stem separately so multiple local AND multiple remote speakers are split
+    (e.g. "Ich"/"Vor Ort 2" locally, "Sprecher 1/2" remotely).
+    """
+    import soundfile as sf
+
+    segments, backend = transcribe(mix_path, model, language, compute_type)
+    if not segments:
+        return segments, backend
+
+    lbl = _labels(language)
+
+    def _load(p):
+        if not p or not Path(p).exists():
+            return None
+        data, _ = sf.read(str(p), dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        return data  # stems are already 16 kHz mono
+
+    mic = _load(stems.get("mic"))
+    system = _load(stems.get("system"))
+
+    def _energy(arr, start, end):
+        if arr is None:
+            return 0.0
+        a, b = max(0, int(start * 16_000)), min(len(arr), int(end * 16_000))
+        return _rms(arr[a:b]) if b > a else 0.0
+
+    # 1) Attribute each segment to a side (you vs. remote) by which stem is
+    #    louder over the segment window.
+    mic_segs, sys_segs = [], []
+    for seg in segments:
+        if _energy(mic, seg.start, seg.end) >= _energy(system, seg.start, seg.end):
+            mic_segs.append(seg)
+        else:
+            sys_segs.append(seg)
+
+    # 2) Either split each side into individual people (pyannote per stem —
+    #    handles multiple local AND multiple remote speakers), or just label
+    #    the side.
+    if detect_speakers:
+        try:
+            mic_turns = diarize_turns(Path(stems["mic"]), hf_token) if stems.get("mic") and mic is not None else []
+            _assign_side(mic_segs, mic_turns, lbl["local"], lbl["local_multi"])
+        except RuntimeError:
+            for s in mic_segs:
+                s.speaker = lbl["local"]
+        try:
+            sys_turns = diarize_turns(Path(stems["system"]), hf_token,
+                                      num_speakers, min_speakers, max_speakers) \
+                if stems.get("system") and system is not None else []
+            _assign_side(sys_segs, sys_turns, lbl["remote"], lbl["remote_multi"])
+        except RuntimeError:
+            for s in sys_segs:
+                s.speaker = lbl["remote"]
+    else:
+        for s in mic_segs:
+            s.speaker = lbl["local"]
+        for s in sys_segs:
+            s.speaker = lbl["remote"]
+
+    return segments, backend
+
+
 def diarization_ready(hf_token: Optional[str]) -> Tuple[bool, Optional[str]]:
     """Return (ready, reason_if_not) for speaker detection."""
     try:
@@ -161,18 +262,16 @@ def diarization_ready(hf_token: Optional[str]) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
-def diarize(
+def diarize_turns(
     audio_path: Path,
-    segments: List[Segment],
     hf_token: Optional[str],
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
-) -> List[Segment]:
-    """Assign a speaker label to each segment using pyannote.
+) -> List[tuple]:
+    """Run pyannote and return raw speaker turns ``[(start, end, label), …]``.
 
-    Requires the ``persons`` extra (``pip install 'meetre[persons]'``) and a
-    HuggingFace token with access to ``pyannote/speaker-diarization-3.1``.
+    Requires the ``persons`` extra and a HuggingFace token.
     """
     try:
         from pyannote.audio import Pipeline
@@ -195,8 +294,7 @@ def diarize(
     _orig_load = torch.load
 
     def _trusting_load(*a, **k):
-        # Force it off — Lightning passes weights_only=True explicitly.
-        k["weights_only"] = False
+        k["weights_only"] = False  # Lightning passes weights_only=True explicitly
         return _orig_load(*a, **k)
 
     torch.load = _trusting_load
@@ -207,8 +305,7 @@ def diarize(
     finally:
         torch.load = _orig_load
 
-    # Exact count wins; otherwise pass whichever range bounds are set so
-    # pyannote estimates the speaker count within them.
+    # Exact count wins; otherwise pass whichever range bounds are set.
     kwargs: dict = {}
     if num_speakers:
         kwargs["num_speakers"] = num_speakers
@@ -218,24 +315,48 @@ def diarize(
         if max_speakers:
             kwargs["max_speakers"] = max_speakers
     diarization = pipeline(str(audio_path), **kwargs)
-
-    turns = [
+    return [
         (turn.start, turn.end, speaker)
         for turn, _, speaker in diarization.itertracks(yield_label=True)
     ]
 
-    def best_speaker(seg: Segment) -> Optional[str]:
-        best, best_overlap = None, 0.0
-        for ts, te, spk in turns:
-            overlap = min(seg.end, te) - max(seg.start, ts)
-            if overlap > best_overlap:
-                best_overlap, best = overlap, spk
-        return best
 
-    # Normalise pyannote's SPEAKER_00 → "Speaker 1" for readability.
+def _best_turn(turns: List[tuple], start: float, end: float) -> Optional[str]:
+    best, best_overlap = None, 0.0
+    for ts, te, spk in turns:
+        overlap = min(end, te) - max(start, ts)
+        if overlap > best_overlap:
+            best_overlap, best = overlap, spk
+    return best
+
+
+def _assign_side(side_segs: List[Segment], turns: List[tuple],
+                 single_label: str, multi_label: str) -> None:
+    """Label segments on one side; use a numbered scheme only if >1 speaker."""
+    raws = [_best_turn(turns, s.start, s.end) for s in side_segs]
+    uniq = list(dict.fromkeys(r for r in raws if r is not None))
+    if len(uniq) <= 1:
+        for s in side_segs:
+            s.speaker = single_label
+    else:
+        order = {u: i + 1 for i, u in enumerate(uniq)}
+        for s, r in zip(side_segs, raws):
+            s.speaker = f"{multi_label} {order[r]}" if r in order else f"{multi_label} 1"
+
+
+def diarize(
+    audio_path: Path,
+    segments: List[Segment],
+    hf_token: Optional[str],
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> List[Segment]:
+    """Assign a "Speaker N" label to each segment using pyannote on one file."""
+    turns = diarize_turns(audio_path, hf_token, num_speakers, min_speakers, max_speakers)
     label_map: dict = {}
     for seg in segments:
-        raw = best_speaker(seg)
+        raw = _best_turn(turns, seg.start, seg.end)
         if raw is not None:
             if raw not in label_map:
                 label_map[raw] = f"Speaker {len(label_map) + 1}"

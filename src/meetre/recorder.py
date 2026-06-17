@@ -231,14 +231,23 @@ class Recorder:
         # audio) fails to start, we keep recording the rest rather than abort.
         self._essential: list = []
         if mic_device is not None:
-            self._sources.append(_Source(mic_device))
+            src = _Source(mic_device)
+            src.role = "mic"
+            self._sources.append(src)
             self._essential.append(True)
         if native_system:
-            self._sources.append(_SystemAudioSource())
+            src = _SystemAudioSource()
+            src.role = "system"
+            self._sources.append(src)
             self._essential.append(False)
         elif system_device is not None:
-            self._sources.append(_Source(system_device))
+            src = _Source(system_device)
+            src.role = "system"
+            self._sources.append(src)
             self._essential.append(False)
+        # Per-source 16 kHz stems, populated by stop(): {role: Path}. Kept so the
+        # transcriber can attribute speakers by source instead of a mono mix.
+        self.stems: dict = {}
         # Populated by start(): non-fatal messages about sources that dropped.
         self.start_errors: List[str] = []
 
@@ -277,6 +286,7 @@ class Recorder:
         import soundfile as sf
 
         tracks = []
+        self.stems = {}
         for src in self._sources:
             if not src.path.exists():
                 continue
@@ -290,6 +300,11 @@ class Recorder:
                     np.linspace(0, len(data), n, endpoint=False),
                     np.arange(len(data)), data,
                 ).astype("float32")
+            # Save a per-source stem for source-aware diarization.
+            role = getattr(src, "role", "source")
+            stem = Path(tempfile.mktemp(suffix=f"_meetre_stem_{role}.wav"))
+            sf.write(str(stem), data, SAMPLE_RATE, subtype="PCM_16")
+            self.stems[role] = stem
             tracks.append(data)
             src.path.unlink(missing_ok=True)
 

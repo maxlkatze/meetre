@@ -521,6 +521,7 @@ class MeetreApp(rumps.App if rumps else object):
         recorder = self._recorder
         try:
             final_audio = recorder.stop()
+            stems = dict(getattr(recorder, "stems", {}))
             duration = recorder.seconds
 
             # MP3 backup
@@ -530,31 +531,44 @@ class MeetreApp(rumps.App if rumps else object):
             except Exception:  # noqa: BLE001
                 pass
 
-            # Ensure the whisper model is present (shows a download bar), then
-            # transcribe (shows a spinner + "Transcribing…").
+            # Ensure the whisper model is present (shows a download bar).
             self._stage("Loading transcription model…")
             self._ensure_model(transcriber.mlx_repo(self.cfg.model), f"Whisper {self.cfg.model}")
-            self._stage("Transcribing…")
-            segments, backend = transcriber.transcribe(
-                final_audio, model=self.cfg.model, language=self.cfg.language,
-                compute_type=self.cfg.compute_type,
-            )
+            use_persons = self.cfg.person_detection
+
+            source_aware = "mic" in stems and "system" in stems
+            if source_aware:
+                # One transcription of the mix (clean timing); attribute each
+                # segment to you vs. remote from the separated stems.
+                self._stage("Transcribing…")
+                segments, backend = transcriber.transcribe_attributed(
+                    final_audio, stems, model=self.cfg.model, language=self.cfg.language,
+                    compute_type=self.cfg.compute_type, detect_speakers=use_persons,
+                    hf_token=self.cfg.hf_token, num_speakers=self.cfg.num_speakers,
+                    min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers,
+                )
+                use_persons = True
+            else:
+                self._stage("Transcribing…")
+                segments, backend = transcriber.transcribe(
+                    final_audio, model=self.cfg.model, language=self.cfg.language,
+                    compute_type=self.cfg.compute_type,
+                )
+                if segments and use_persons:
+                    self._stage("Detecting speakers…")
+                    try:
+                        segments = transcriber.diarize(
+                            final_audio, segments, self.cfg.hf_token,
+                            num_speakers=self.cfg.num_speakers,
+                            min_speakers=self.cfg.min_speakers,
+                            max_speakers=self.cfg.max_speakers,
+                        )
+                    except RuntimeError as e:
+                        self._notify("meetre", "Speaker detection skipped", str(e))
+                        use_persons = False
             if not segments:
                 self._notify("meetre", "Done", "No speech detected.")
                 return
-            use_persons = self.cfg.person_detection
-            if use_persons:
-                self._stage("Detecting speakers…")
-                try:
-                    segments = transcriber.diarize(
-                        final_audio, segments, self.cfg.hf_token,
-                        num_speakers=self.cfg.num_speakers,
-                        min_speakers=self.cfg.min_speakers,
-                        max_speakers=self.cfg.max_speakers,
-                    )
-                except RuntimeError as e:
-                    self._notify("meetre", "Speaker detection skipped", str(e))
-                    use_persons = False
 
             # Generate the summary ONCE; reuse it for the transcript and Notes.
             summary = self._generate_summary(segments)
@@ -579,10 +593,11 @@ class MeetreApp(rumps.App if rumps else object):
                 except RuntimeError as e:
                     self._notify("meetre", "Apple Notes failed", str(e))
 
-            try:
-                final_audio.unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+            for p in [final_audio, *stems.values()]:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as e:  # noqa: BLE001
             self._notify("meetre", "Recording failed", str(e))
         finally:

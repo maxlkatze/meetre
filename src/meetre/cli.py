@@ -76,7 +76,7 @@ def _ensure_model_cli(repo: str, label: str) -> None:
 
 def _transcribe_and_write(
     cfg: Config, audio_path: Path, *, title: str, started, duration: float,
-    persons: Optional[bool],
+    persons: Optional[bool], stems: Optional[dict] = None,
 ) -> Optional[Path]:
     """Shared pipeline: transcribe → (optional) diarize → write transcript."""
     backend = transcriber.available_backend()
@@ -84,29 +84,46 @@ def _transcribe_and_write(
 
     if backend == "mlx-whisper":
         _ensure_model_cli(transcriber.mlx_repo(cfg.model), f"Whisper {cfg.model}")
-    with ui.console.status(f"[cyan]Transcribing with {cfg.model} ({backend})…", spinner="dots"):
-        segments, used_backend = transcriber.transcribe(
-            audio_path, model=cfg.model, language=cfg.language,
-            compute_type=cfg.compute_type,
-        )
 
-    if not segments:
-        ui.warn("No speech detected — nothing to transcribe.")
-        return None
-
-    if use_persons:
-        try:
-            with ui.console.status("[cyan]Detecting speakers…", spinner="dots"):
-                segments = transcriber.diarize(
-                    audio_path, segments, cfg.hf_token,
-                    num_speakers=cfg.num_speakers,
-                    min_speakers=cfg.min_speakers,
-                    max_speakers=cfg.max_speakers,
-                )
-            ui.ok("Speaker detection complete")
-        except RuntimeError as e:
-            ui.warn(str(e))
-            use_persons = False
+    # Source-aware path: when we have separate mic + system stems, transcribe
+    # each separately (mic = you, system = remote) — far better attribution
+    # than diarizing a mono mix.
+    source_aware = bool(stems) and "mic" in stems and "system" in stems
+    if source_aware:
+        with ui.console.status(f"[cyan]Transcribing with {cfg.model} (Me vs. remote)…", spinner="dots"):
+            segments, used_backend = transcriber.transcribe_attributed(
+                audio_path, stems, model=cfg.model, language=cfg.language,
+                compute_type=cfg.compute_type, detect_speakers=use_persons,
+                hf_token=cfg.hf_token, num_speakers=cfg.num_speakers,
+                min_speakers=cfg.min_speakers, max_speakers=cfg.max_speakers,
+            )
+        use_persons = True  # we always have at least Me vs. remote
+        if not segments:
+            ui.warn("No speech detected — nothing to transcribe.")
+            return None
+        ui.ok("Transcribed with source attribution (Me vs. remote)")
+    else:
+        with ui.console.status(f"[cyan]Transcribing with {cfg.model} ({backend})…", spinner="dots"):
+            segments, used_backend = transcriber.transcribe(
+                audio_path, model=cfg.model, language=cfg.language,
+                compute_type=cfg.compute_type,
+            )
+        if not segments:
+            ui.warn("No speech detected — nothing to transcribe.")
+            return None
+        if use_persons:
+            try:
+                with ui.console.status("[cyan]Detecting speakers…", spinner="dots"):
+                    segments = transcriber.diarize(
+                        audio_path, segments, cfg.hf_token,
+                        num_speakers=cfg.num_speakers,
+                        min_speakers=cfg.min_speakers,
+                        max_speakers=cfg.max_speakers,
+                    )
+                ui.ok("Speaker detection complete")
+            except RuntimeError as e:
+                ui.warn(str(e))
+                use_persons = False
 
     # --- Optional local-LLM summary (generated once, reused for Notes) ---
     summary = ""
@@ -236,6 +253,7 @@ def do_record(cfg: Config, name: Optional[str] = None, persons: Optional[bool] =
 
     ui.info("Finishing recording…")
     final_audio = recorder.stop()
+    stems = dict(getattr(recorder, "stems", {}))
     duration = recorder.seconds
     ui.ok(f"Captured {int(duration)}s of audio")
 
@@ -252,14 +270,15 @@ def do_record(cfg: Config, name: Optional[str] = None, persons: Optional[bool] =
     # --- Transcribe (+ optional diarize) and write transcript ---
     written = _transcribe_and_write(
         cfg, final_audio, title=title, started=started,
-        duration=duration, persons=persons,
+        duration=duration, persons=persons, stems=stems,
     )
     # (Summary + Apple Notes are handled automatically in _transcribe_and_write.)
-    # Drop the bulky WAV; the MP3 backup is the retained copy.
-    try:
-        final_audio.unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
+    # Drop the bulky WAV + stems; the MP3 backup is the retained copy.
+    for p in [final_audio, *stems.values()]:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def do_transcribe(cfg: Config, file: str, name: Optional[str] = None,

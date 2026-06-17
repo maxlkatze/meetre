@@ -146,13 +146,24 @@ meetre config                # view or edit all settings
 
 ## Speaker detection
 
-Uses `pyannote`. A headcount hint improves accuracy noticeably.
+meetre records your mic and the system audio as separate stems, so it can tell
+**you (and anyone in your room) apart from the remote participants** even before
+diarization. The transcript is produced from one mixed timeline (accurate
+timestamps); each line is then attributed to a side by which stem was active, and
+`pyannote` runs on each stem separately to split multiple speakers per side.
+
+- One person on your side: labelled `Ich` (de) / `Me` (en).
+- Several people in your room: `Vor Ort 1/2…` (de) / `Local 1/2…` (en).
+- Remote participants: `Sprecher 1/2…` (de) / `Speaker 1/2…` (en).
+
+Diarizing clean single-source stems is far more reliable than diarizing a mono
+mix of mic + system audio.
 
 ```bash
 pip install -e '.[persons]'
 meetre config hf_token <token>     # free, from huggingface.co/settings/tokens
 meetre persons on
-meetre speakers 3-6
+meetre speakers 3-6                # headcount hint for the remote side
 ```
 
 Accept the model terms at `huggingface.co/pyannote/speaker-diarization-3.1` and
