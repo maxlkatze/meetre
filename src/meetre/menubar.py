@@ -995,8 +995,19 @@ class MeetreApp(rumps.App if rumps else object):
         import os
         import sys
 
+        from . import bundle
+
+        # Re-exec the way the app is actually launched (python -m meetre.menubar),
+        # NOT [sys.executable] + sys.argv: under "-m" sys.argv is just the path to
+        # menubar.py, and re-running that as a top-level script dies immediately on
+        # its package-relative imports — which is why restart never came back up.
+        # bundle.launch_args() gives the bundle exe + ["-m", "meetre.menubar"];
+        # fall back to the current interpreter when there's no bundle (dev runs).
+        args = bundle.launch_args() or [sys.executable, "-m", "meetre.menubar"]
         try:
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = bundle._pythonpath()
+            os.execve(args[0], args, env)
         except Exception as e:  # noqa: BLE001
             rumps.alert("Could not restart", str(e))
 

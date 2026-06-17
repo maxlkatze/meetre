@@ -2,6 +2,10 @@
 
 Guidance for working in this repository.
 
+## Commits
+
+- Do **not** add a `Co-Authored-By` trailer or any Claude/AI attribution to commits.
+
 ## What meetre is
 
 macOS-only meeting recorder + transcriber. Captures microphone and system audio
