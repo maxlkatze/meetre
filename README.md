@@ -99,16 +99,17 @@ dependencies 1–3 GB (the `persons` extra adds PyTorch).
 ## Performance by Mac (approximate)
 
 Real-time factor is minutes of audio transcribed per minute of compute (higher is
-faster). Summary time is for a typical 30-minute meeting with `Qwen3-8B-4bit`. The
-first run also downloads the models once.
+faster). Summary time is for a typical 30-minute meeting with a small/mid summary
+model; reasoning models (Qwen3.5) trade a little extra time for noticeably better
+structure. The first run also downloads the models once.
 
-| Chip | RAM | Transcribe (large-v3-turbo) | Summary (Qwen3-8B) | Notes |
-|------|-----|------------------------------|---------------------|-------|
-| M1 / M1 Pro | 8–16 GB | ~6–9x real-time | ~10–20 s | Great for transcripts; use `qwen3-4b` on 8 GB |
-| M2 / M2 Pro/Max | 8–32 GB | ~8–12x real-time | ~8–15 s | Full pipeline runs smoothly |
-| M3 / M3 Pro/Max | 16–36 GB | ~10–14x real-time | ~6–12 s | Comfortable everywhere |
-| M4 / M4 Pro/Max | 16–48 GB | ~12–16x real-time | ~5–9 s | Fast |
-| M5 / M5 Pro/Max | 24–48 GB+ | ~14–18x real-time | ~4–8 s | Effortless |
+| Chip | RAM | Transcribe (large-v3-turbo) | Summary | Auto summary model | Notes |
+|------|-----|------------------------------|---------|--------------------|-------|
+| M1 / M1 Pro | 8–16 GB | ~6–9x real-time | ~10–25 s | `qwen3.5-4b` / `gemma4-12b` | Great for transcripts; reasoning fits from 16 GB |
+| M2 / M2 Pro/Max | 8–32 GB | ~8–12x real-time | ~8–20 s | `gemma4-12b` / `qwen3.5-9b` | Full pipeline runs smoothly |
+| M3 / M3 Pro/Max | 16–36 GB | ~10–14x real-time | ~8–18 s | `qwen3.5-9b` / `qwen3.5-35b` | Comfortable everywhere |
+| M4 / M4 Pro/Max | 16–48 GB | ~12–16x real-time | ~6–15 s | `qwen3.5-35b` | Fast |
+| M5 / M5 Pro/Max | 24–48 GB+ | ~14–18x real-time | ~5–12 s | `qwen3.5-35b` / `qwen3.5-27b` | Effortless |
 
 These are estimates, not benchmarks. They vary with thermals, other running apps,
 meeting length, and whether speaker detection is enabled. A 30-minute meeting
@@ -127,17 +128,29 @@ pip install -e '.[cpu]'     # faster-whisper fallback for non-Apple-Silicon
 
 ## Menu bar
 
-Click the `✦` icon:
-
-- **Record…** opens a settings popup: meeting name, model, language, summary
-  model, system-audio and speaker toggles, a speaker slider, and an editable AI
-  prompt with a reset button. Choices are remembered for next time.
-- Live status while working, for example `02:14`, a download bar, or
-  "Transcribing…".
-- **Summarize last → Apple Notes**, **Check for updates**, **Start at login**.
-
 The app lives only in the menu bar (no Dock icon) and keeps running after you
-close the terminal.
+close the terminal. It shows a real image icon (`✦`-style sparkle, tinted to
+match light/dark menus) and stays live even while the menu is open.
+
+Click the icon:
+
+- **Record…** — opens a settings popup: meeting name, transcription model,
+  language, summary model, system-audio and speaker toggles, a speaker slider,
+  and an editable AI prompt with a reset button. Choices are remembered.
+- **Stop** — finishes the recording and runs the pipeline in the background.
+- **Model / Language / Summary model / Speakers** — quick pickers. The summary
+  picker is sized for your machine: too-large models are greyed out, `✓` marks
+  downloaded ones, and `🧠` marks reasoning models.
+- **System audio** and **Person detection** toggles.
+- **Settings…**, **Summarize last → Apple Notes (local)**, **Open transcripts
+  folder**, and **Downloaded models** (click one to uninstall and free space).
+- **About meetre** submenu — version, **Check for updates**, **Restart meetre**,
+  **Start at login**, **Quit meetre**.
+
+While working, the menu bar shows live status — recording time `⏺ 02:14`, a
+download bar `⬇ 45%`, or a spinning `Transcribing… / Summarizing…` — and posts a
+native notification (with the app icon) such as **✓ Standup — done · 31 min**
+when the transcript and summary are ready.
 
 ## Command line
 
@@ -146,16 +159,24 @@ meetre                       # launch the menu-bar app (default)
 meetre cli                   # interactive text menu
 meetre menubar               # launch the menu-bar app (detached)
 
-meetre record --name "Standup"
-meetre transcribe call.mp3   # re-transcribe an audio file
-meetre localsummary          # summarise a transcript in-place (offline)
-meetre summarize             # latest transcript to Apple Notes (local)
-meetre list / open / devices
-meetre model large-v3-turbo  # tiny | base | small | medium | large-v3 | large-v3-turbo
-meetre persons on            # speaker detection
-meetre speakers 3-6          # auto | exact (4) | range (3-6)
-meetre update                # git pull + reinstall
-meetre config                # view or edit all settings
+meetre record --name "Standup"   # record + transcribe (--persons to force diarization)
+meetre transcribe call.mp3       # re-transcribe an audio file (MP3/WAV)
+meetre localsummary              # summarise a transcript in-place (offline)
+meetre summarize                 # latest transcript → Apple Notes (local)
+meetre list                      # list saved transcripts
+meetre open                      # open the transcripts folder in Finder
+meetre devices                   # list audio input devices
+
+meetre model large-v3-turbo      # tiny | base | small | medium | large-v3 | large-v3-turbo
+meetre summary-model             # show summary models, sizes, and what fits
+meetre summary-model qwen3.5-35b # set summary model (alias | auto | off | HF repo id)
+meetre models                    # list downloaded models; pass a name/number to uninstall
+meetre persons on                # speaker detection (on | off)
+meetre speakers 3-6              # auto | exact (4) | range (3-6)
+
+meetre update                    # git pull + reinstall
+meetre config                    # view all settings
+meetre config <key> <value>      # set one setting
 ```
 
 ## Speaker detection
@@ -186,13 +207,36 @@ Accept the model terms at `huggingface.co/pyannote/speaker-diarization-3.1` and
 ## Local summaries
 
 Every recording is summarised on-device. The summary is embedded at the top of
-the transcript and saved to Apple Notes, generated once.
+the transcript and saved to Apple Notes, generated once. Leave the model on
+`auto` and meetre runs the best one that fits your RAM.
+
+Built-in models (current generation, June 2026):
+
+| Alias | Repo | ~Size | Reasons | Best for |
+|-------|------|-------|:------:|----------|
+| `qwen3.5-2b` | `Qwen3.5-2B-MLX-4bit` | 1.3 GB | 🧠 | 8 GB Macs, fastest |
+| `qwen3.5-4b` | `Qwen3.5-4B-MLX-4bit` | 2.4 GB | 🧠 | small + reasoning |
+| `gemma4-e4b` | `gemma-4-e4b-it-4bit` | 3.4 GB | | minimal, 140+ languages |
+| `qwen3.5-9b` | `Qwen3.5-9B-4bit` | 5.0 GB | 🧠 | balanced, fits 16 GB |
+| `gemma4-12b` | `gemma-4-12B-4bit` | 6.8 GB | | strong multilingual |
+| `mistral-24b` | `Mistral-Small-3.2-24B-…-4bit` | 13.3 GB | | concise all-rounder |
+| `gemma4-26b` | `gemma-4-26b-a4b-it-4bit` | 14.5 GB | | best German / multilingual |
+| `qwen3.5-27b` | `Qwen3.5-27B-4bit` | 15 GB | 🧠 | top dense reasoning |
+| `qwen3.5-35b` | `Qwen3.5-35B-A3B-4bit` | 20 GB | 🧠 | best all-round (MoE, fast) |
+| `qwen3.5-122b` | `Qwen3.5-122B-A10B-MLX-4bit` | 66 GB | 🧠 | high-RAM Studio |
+| `qwen3.5-397b` | `Qwen3.5-397B-A17B-4bit` | 210 GB | 🧠 | Mac Studio Ultra only |
+
+🧠 = hybrid **reasoning** model — it thinks through the meeting before writing,
+which produces sharper structure and better task extraction (the hidden
+reasoning is stripped from the saved summary). Older `qwen3-*` / `gemma3-*`
+aliases still resolve for existing configs.
 
 ```bash
-meetre config summary_model qwen3-8b   # ~4.7 GB, best quality (default)
-meetre config summary_model qwen3-4b   # ~2.5 GB, faster and lighter
-meetre config summary_model gemma3-4b  # ~2.6 GB, 140+ languages
-meetre config auto_summarize off       # transcript only
+meetre summary-model             # list models, sizes, and what fits your Mac
+meetre summary-model auto        # best that fits (default)
+meetre summary-model qwen3.5-35b # best all-round on 32 GB+
+meetre summary-model qwen3.5-4b  # light + reasoning for 8 GB
+meetre summary-model off         # transcript only
 ```
 
 The prompt is editable in the menu bar or via
@@ -223,7 +267,7 @@ remote configured.
 ```
 recorder.py      mic (sounddevice) + system audio (ScreenCaptureKit Swift helper) -> mixed 16 kHz WAV
 transcriber.py   MLX Whisper (large-v3-turbo); pyannote diarization
-summarizer.py    MLX-LM (Qwen3 / Gemma) with an editable prompt
+summarizer.py    MLX-LM (Qwen3.5 reasoning / Gemma 4) with an editable prompt
 transcript.py    Markdown writer (summary + timestamped, speaker-labelled body)
 integrations.py  Apple Notes (AppleScript)
 menubar.py       rumps + AppKit status-bar app
