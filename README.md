@@ -88,11 +88,13 @@ No audio or text leaves the machine. No accounts, no API keys.
 | Disk | ~6 GB for models | ~9 GB with speaker detection |
 | Tools | Xcode Command Line Tools (`xcode-select --install`) | — |
 
-8 GB Macs handle transcription well. For summaries on 8 GB, use `qwen3-4b`
-(`meetre config summary_model qwen3-4b`) or turn summaries off.
+8 GB Macs handle transcription well. For summaries on 8 GB, use `qwen3.5-4b`
+(`meetre summary-model qwen3.5-4b`) or turn summaries off. Leaving the summary
+model on `auto` always picks the best model that fits your RAM.
 
-Disk breakdown: Whisper `large-v3-turbo` is about 1.5 GB, `Qwen3-8B-4bit` about
-4.7 GB, and Python dependencies 1–3 GB (the `persons` extra adds PyTorch).
+Disk breakdown: Whisper `large-v3-turbo` is about 1.5 GB, a small summary model
+(`qwen3.5-4b`) about 2.4 GB up to `qwen3.5-35b` at ~20 GB, and Python
+dependencies 1–3 GB (the `persons` extra adds PyTorch).
 
 ## Performance by Mac (approximate)
 
