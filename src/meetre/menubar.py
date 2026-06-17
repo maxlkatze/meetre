@@ -770,6 +770,7 @@ class MeetreApp(rumps.App if rumps else object):
                     hf_token=self.cfg.hf_token, num_speakers=self.cfg.num_speakers,
                     min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers,
                     progress=self._tx_progress, diar_progress=self._progress,
+                    vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
                 )
                 use_persons = True
             else:
@@ -777,6 +778,7 @@ class MeetreApp(rumps.App if rumps else object):
                 segments, backend = transcriber.transcribe(
                     final_audio, model=self.cfg.model, language=self.cfg.language,
                     compute_type=self.cfg.compute_type, progress=self._tx_progress,
+                    vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
                 )
                 if segments and use_persons:
                     self._stage("Detecting speakers…")

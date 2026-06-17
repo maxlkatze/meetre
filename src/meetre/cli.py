@@ -96,6 +96,7 @@ def _transcribe_and_write(
                 compute_type=cfg.compute_type, detect_speakers=use_persons,
                 hf_token=cfg.hf_token, num_speakers=cfg.num_speakers,
                 min_speakers=cfg.min_speakers, max_speakers=cfg.max_speakers,
+                vad=cfg.vad, word_align=cfg.word_timestamps,
             )
         use_persons = True  # we always have at least Me vs. remote
         if not segments:
@@ -107,6 +108,7 @@ def _transcribe_and_write(
             segments, used_backend = transcriber.transcribe(
                 audio_path, model=cfg.model, language=cfg.language,
                 compute_type=cfg.compute_type,
+                vad=cfg.vad, word_align=cfg.word_timestamps,
             )
         if not segments:
             ui.warn("No speech detected — nothing to transcribe.")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meetre"
-version = "0.3.1"
+version = "0.3.2"
 description = "Record macOS audio and turn meetings into transcripts with speaker association."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,13 @@ cpu = ["faster-whisper>=1.0.0"]
 # Alternative transcription backend: NVIDIA Parakeet TDT v3 on MLX (multilingual,
 # very fast). Selectable as the "parakeet-tdt-v3" model.
 parakeet = ["parakeet-mlx>=0.4"]
+# VAD silence filtering (Silero) + phoneme word-alignment (torchaudio MMS_FA)
+# for the Whisper path. Runs on-device.
+align = [
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "silero-vad>=5.0",
+]
 # macOS menu-bar app (status-bar icon, settings popup with pickers + slider).
 menubar = [
     "rumps>=0.4.0",

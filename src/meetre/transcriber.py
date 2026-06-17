@@ -51,6 +51,8 @@ class Segment:
     end: float
     text: str
     speaker: Optional[str] = None
+    # Optional per-word timing from phoneme alignment: [{"word","start","end"}, …]
+    words: Optional[list] = None
 
 
 # Alternative backend: NVIDIA Parakeet TDT v3 on MLX (multilingual, very fast,
@@ -91,24 +93,51 @@ def transcribe(
     language: Optional[str] = None,
     compute_type: str = "int8",
     progress=None,
+    vad: bool = False,
+    word_align: bool = False,
 ) -> Tuple[List[Segment], str]:
     """Transcribe ``audio_path`` into timestamped segments.
 
     Returns ``(segments, backend_name)``. ``progress`` is an optional
-    callable(seconds_done, total_seconds) for UI updates.
+    callable(seconds_done, total_seconds) for UI updates. ``vad`` drops
+    silence-only (hallucinated) segments; ``word_align`` attaches per-word
+    timestamps via phoneme forced alignment. Both apply to the Whisper path.
     """
     if is_parakeet(model):
         return _transcribe_parakeet(audio_path, model, progress), "parakeet-tdt-v3"
     backend = available_backend()
     if backend == "mlx-whisper":
-        return _transcribe_mlx(audio_path, model, language, progress), backend
-    if backend == "faster-whisper":
-        return _transcribe_faster(audio_path, model, language, compute_type, progress), backend
-    raise RuntimeError(
-        "No transcription backend installed. Install one:\n"
-        "  pip install mlx-whisper      # Apple Silicon (recommended)\n"
-        "  pip install faster-whisper   # Intel / fallback"
-    )
+        segs = _transcribe_mlx(audio_path, model, language, progress)
+    elif backend == "faster-whisper":
+        # faster-whisper already VAD-filters internally (vad_filter=True).
+        segs = _transcribe_faster(audio_path, model, language, compute_type, progress)
+    else:
+        raise RuntimeError(
+            "No transcription backend installed. Install one:\n"
+            "  pip install mlx-whisper      # Apple Silicon (recommended)\n"
+            "  pip install faster-whisper   # Intel / fallback"
+        )
+    segs = _post_process(segs, audio_path, vad and backend == "mlx-whisper", word_align)
+    return segs, backend
+
+
+def _post_process(segments, audio_path, vad: bool, word_align: bool):
+    """Optional VAD silence filtering + phoneme word-alignment (best-effort)."""
+    if not segments or not (vad or word_align):
+        return segments
+    from . import align
+
+    if vad:
+        try:
+            segments = align.filter_silence(segments, audio_path)
+        except Exception:  # noqa: BLE001
+            pass
+    if word_align:
+        try:
+            segments = align.align_words(segments, audio_path)
+        except Exception:  # noqa: BLE001
+            pass
+    return segments
 
 
 # Even out loudness before transcription so a soft-spoken or distant participant
@@ -311,6 +340,8 @@ def transcribe_attributed(
     max_speakers: Optional[int] = None,
     progress=None,
     diar_progress=None,
+    vad: bool = False,
+    word_align: bool = False,
 ) -> Tuple[List[Segment], str]:
     """Transcribe the mixed audio once, then attribute speakers from the stems.
 
@@ -326,7 +357,8 @@ def transcribe_attributed(
     """
     import soundfile as sf
 
-    segments, backend = transcribe(mix_path, model, language, compute_type, progress=progress)
+    segments, backend = transcribe(mix_path, model, language, compute_type,
+                                   progress=progress, vad=vad, word_align=word_align)
     if not segments:
         return segments, backend
 

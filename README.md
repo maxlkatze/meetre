@@ -65,11 +65,15 @@ No audio or text leaves the machine. No accounts, no API keys.
 
 - Microphone and system audio, mixed into one track. System audio is captured
   natively via ScreenCaptureKit, so no BlackHole or loopback driver is needed.
-- MLX transcription, the fastest Whisper backend on Apple Silicon.
+- MLX transcription, the fastest Whisper backend on Apple Silicon — plus an
+  optional **NVIDIA Parakeet TDT v3** model (multilingual, very fast) to compare.
 - Automatic loudness levelling before transcription: soft-spoken or distant
   participants are boosted to match louder speakers (gated so silence and
   background noise aren't amplified), which improves accuracy on quiet voices.
   The saved recording stays untouched.
+- Optional **VAD** (Silero) drops silence-only segments — fewer Whisper
+  hallucinations during quiet stretches — and **phoneme forced alignment**
+  (torchaudio MMS_FA) attaches exact per-word timestamps. Both on-device.
 - German by default, with multilingual and auto-detect support.
 - Speaker detection with an optional headcount hint (`auto`, `4`, or `3-6`).
 - Local LLM summaries with a fully editable prompt. Newest models built in:
@@ -126,7 +130,9 @@ If you prefer not to use `install.sh`:
 ```bash
 pip install -e .            # core, including MLX transcription + summaries
 pip install -e '.[menubar]' # the macOS menu-bar app (rumps + pyobjc)
-pip install -e '.[persons]' # optional speaker diarization
+pip install -e '.[persons]' # optional speaker diarization (pyannote 4.x)
+pip install -e '.[parakeet]'# optional Parakeet TDT v3 transcription model
+pip install -e '.[align]'   # optional VAD + phoneme word-alignment (Whisper)
 pip install -e '.[cpu]'     # faster-whisper fallback for non-Apple-Silicon
 ```
 
@@ -171,7 +177,7 @@ meetre list                      # list saved transcripts
 meetre open                      # open the transcripts folder in Finder
 meetre devices                   # list audio input devices
 
-meetre model large-v3-turbo      # tiny | base | small | medium | large-v3 | large-v3-turbo
+meetre model large-v3-turbo      # tiny | base | small | medium | large-v3 | large-v3-turbo | parakeet-tdt-v3
 meetre summary-model             # show summary models, sizes, and what fits
 meetre summary-model qwen3.5-35b # set summary model (alias | auto | off | HF repo id)
 meetre models                    # list downloaded models; pass a name/number to uninstall
@@ -263,8 +269,14 @@ access is the one-time model downloads from HuggingFace and the optional
 Stored at `~/.config/meetre/config.json`. Keys: `model`, `language`,
 `person_detection`, `num_speakers`, `min_speakers`, `max_speakers`,
 `transcripts_dir`, `audio_backup_dir`, `mic_device`, `system_device`,
-`capture_system`, `native_system`, `hf_token`, `compute_type`, `summary_model`,
-`auto_summarize`, `auto_notes`, `summary_prompt`, `auto_update`.
+`capture_system`, `native_system`, `hf_token`, `compute_type`, `vad`,
+`word_timestamps`, `summary_model`, `auto_summarize`, `auto_notes`,
+`summary_prompt`, `auto_update`.
+
+`vad` (default on) drops silence-only Whisper segments; `word_timestamps`
+(default on) adds per-word times via phoneme alignment. Both need the `align`
+extra and apply to the Whisper path. Turn off with `meetre config vad off` /
+`meetre config word_timestamps off`.
 
 ## Updating
 
@@ -276,7 +288,8 @@ remote configured.
 
 ```
 recorder.py      mic (sounddevice) + system audio (ScreenCaptureKit Swift helper) -> mixed 16 kHz WAV
-transcriber.py   MLX Whisper (large-v3-turbo); gated AGC level + pyannote diarization
+transcriber.py   MLX Whisper / Parakeet TDT v3; gated AGC level + pyannote diarization
+align.py         Silero VAD (silence filtering) + MMS_FA phoneme word-alignment
 summarizer.py    MLX-LM (Qwen3.5 / Gemma 4, direct mode) with an editable prompt
 transcript.py    Markdown writer (summary + timestamped, speaker-labelled body)
 integrations.py  Apple Notes (AppleScript)

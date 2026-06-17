@@ -55,6 +55,12 @@ class Config:
     hf_token: Optional[str] = None
     # Compute type for faster-whisper ("int8" is fast & light on CPU).
     compute_type: str = "int8"
+    # Voice-activity detection: drop silence-only (hallucinated) Whisper
+    # segments before saving. Needs the 'align' extra (Silero VAD).
+    vad: bool = True
+    # Phoneme forced alignment: attach exact per-word timestamps to each
+    # segment. Needs the 'align' extra (torchaudio MMS_FA).
+    word_timestamps: bool = True
     # Local LLM summarization. "auto" picks the best model that fits this
     # machine's RAM; or pin an alias (e.g. qwen3-32b/gemma3-27b/qwen3-8b) or a
     # full HF repo id. See meetre.summarizer.SUMMARY_MODELS.
