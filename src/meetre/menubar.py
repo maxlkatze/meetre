@@ -382,6 +382,7 @@ class MeetreApp(rumps.App if rumps else object):
         self.state = "idle"          # idle | recording | processing
         self._recorder = None
         self._rec_meta = None        # (title, started, tmp_wav)
+        self._auto_title = False     # derive title from summary when no name given
         self._settings_ctrl = None   # keep the settings window alive
         self._stage_text = None      # current processing stage label
         self._download = None        # (icon, label, fraction) while a bar is active
@@ -430,6 +431,8 @@ class MeetreApp(rumps.App if rumps else object):
         self.status_item = rumps.MenuItem("✦ Ready")
         self.status_item.set_callback(None)
         self.rec_item = rumps.MenuItem("● Record…", callback=self.on_record)
+        self.rec_prev_item = rumps.MenuItem("● Record with previous",
+                                            callback=self.on_record_previous)
         self.stop_item = rumps.MenuItem("■ Stop", callback=self.on_stop)
         self.stop_item.set_callback(None)  # disabled until recording
 
@@ -522,6 +525,7 @@ class MeetreApp(rumps.App if rumps else object):
             self.status_item,
             None,
             self.rec_item,
+            self.rec_prev_item,
             self.stop_item,
             None,
             model_menu,
@@ -652,12 +656,29 @@ class MeetreApp(rumps.App if rumps else object):
         self._settings_ctrl = _build_settings_window(
             self.cfg, self._start_recording, want_name=True)
 
-    def _start_recording(self, values):
-        from . import recorder as rec
-        from . import transcriber
+    def on_record_previous(self, sender=None):
+        """Start recording immediately with the last-used settings — no dialog.
 
+        No meeting name is asked for; the title is auto-derived from the summary
+        once the recording is transcribed (see :meth:`_finish`)."""
+        if self.state != "idle":
+            return
+        self.cfg = Config.load()
+        self._begin_recording(name=None)
+
+    def _start_recording(self, values):
         self._save_values(values)
         self._summarize_after = values.get("summarize_after", False)
+        self._begin_recording(name=values.get("name"))
+
+    def _begin_recording(self, name=None):
+        """Fire up the recorder using the current ``self.cfg``.
+
+        ``name`` is the user-supplied meeting title; when empty/None the title
+        is provisionally a timestamp and ``_auto_title`` is set so :meth:`_finish`
+        replaces it with an LLM-generated title derived from the summary."""
+        from . import recorder as rec
+        from . import transcriber
 
         if transcriber.available_backend() is None:
             rumps.alert("No transcription backend installed (pip install mlx-whisper).")
@@ -669,7 +690,9 @@ class MeetreApp(rumps.App if rumps else object):
             rumps.alert("No audio input device found.")
             return
 
-        title = values.get("name") or f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        name = (name or "").strip()
+        self._auto_title = not name
+        title = name or f"Meeting {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         started = datetime.now()
         stamp = started.strftime("%Y-%m-%d_%H-%M-%S")
         tmp_wav = Path(tempfile.gettempdir()) / f"meetre_{stamp}.wav"
@@ -688,6 +711,7 @@ class MeetreApp(rumps.App if rumps else object):
         self.state = "recording"
         self.stop_item.set_callback(self.on_stop)
         self.rec_item.set_callback(None)
+        self.rec_prev_item.set_callback(None)
 
     def on_stop(self, sender=None):
         if self.state != "recording" or self._recorder is None:
@@ -800,6 +824,13 @@ class MeetreApp(rumps.App if rumps else object):
             # Generate the summary ONCE; reuse it for the transcript and Notes.
             summary = self._generate_summary(segments)
 
+            # Secondary action: when no meeting name was given (e.g. "Record
+            # with previous"), derive a concise title from the summary so the
+            # transcript and Apple Note get a meaningful name instead of a
+            # bare timestamp.
+            if getattr(self, "_auto_title", False):
+                title = self._generate_title(summary, segments, fallback=title)
+
             path = write_transcript(
                 segments, self.cfg.transcripts_path, title=title, started_at=started,
                 duration=duration, model=self.cfg.model, backend=backend,
@@ -836,6 +867,7 @@ class MeetreApp(rumps.App if rumps else object):
             self._rec_meta = None
             self.state = "idle"
             self.rec_item.set_callback(self.on_record)
+            self.rec_prev_item.set_callback(self.on_record_previous)
 
     # -- summarize / misc ---------------------------------------------------
 
@@ -880,6 +912,31 @@ class MeetreApp(rumps.App if rumps else object):
         except Exception as e:  # noqa: BLE001
             self._notify("meetre", "Summary failed", _summary_error_hint(e))
             return ""
+
+    def _generate_title(self, summary, segments, fallback: str) -> str:
+        """Derive a short meeting title from the summary (or transcript).
+
+        Returns ``fallback`` (the timestamp title) if summaries are disabled,
+        the backend is unavailable, or generation fails — never raises."""
+        from . import summarizer
+
+        if not self.cfg.auto_summarize or not summarizer.available():
+            return fallback
+        source = (summary or "").strip()
+        if not source:
+            source = "\n".join(
+                (f"{s.speaker}: " if getattr(s, "speaker", None) else "") + s.text
+                for s in segments
+            )
+        if not source.strip():
+            return fallback
+        try:
+            self._stage("Naming meeting…")
+            title = summarizer.generate_title(
+                source, model=self.cfg.summary_model, language=self.cfg.language)
+            return title.strip() or fallback
+        except Exception:  # noqa: BLE001
+            return fallback
 
     def _summarize_path(self, path: Path):
         """Manual 'Summarize last': reuse the embedded summary, else generate."""

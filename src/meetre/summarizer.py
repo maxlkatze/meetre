@@ -73,14 +73,37 @@ _USABLE_FRACTION = 0.70
 
 
 def system_memory_gb() -> float:
-    """Total physical/unified RAM in GB for this machine (0.0 if unknown)."""
+    """Total physical/unified RAM in GB for this machine (0.0 if unknown).
+
+    Detection must work when the app is launched by launchd / "start at login"
+    or after a "Restart meetre", where ``PATH`` is empty — a bare
+    ``subprocess.run(["sysctl", ...])`` then raises ``FileNotFoundError`` and we
+    used to fall back to 0.0, which made *every* model look like it fits (the
+    budget check treats 0 as "unknown → allow"). So prefer the in-process
+    ``os.sysconf`` route, which needs no subprocess at all, and only fall back
+    to an absolute-path ``sysctl`` if that is unavailable.
+    """
+    # 1) In-process: page size × physical pages. No PATH, no subprocess.
     try:
-        out = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2
-        )
-        return int(out.stdout.strip()) / (1024 ** 3)
-    except Exception:
-        return 0.0
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return (pages * page_size) / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        pass
+
+    # 2) Fallback: sysctl by absolute path so an empty PATH can't hide it.
+    for sysctl in ("/usr/sbin/sysctl", "/sbin/sysctl", "sysctl"):
+        try:
+            out = subprocess.run(
+                [sysctl, "-n", "hw.memsize"], capture_output=True, text=True, timeout=2
+            )
+            value = out.stdout.strip()
+            if value:
+                return int(value) / (1024 ** 3)
+        except (OSError, ValueError):
+            continue
+    return 0.0
 
 
 def model_budget_gb(total_gb: Optional[float] = None) -> float:
@@ -398,6 +421,15 @@ _REDUCE = {
 
 _TRANSCRIPT_LABEL = {"de": "Transkript", "en": "Transcript"}
 
+_TITLE_INSTRUCTION = {
+    "de": "Gib einen kurzen, konkreten Titel für dieses Meeting an — 3 bis 8 "
+          "Wörter, der das Kernthema benennt. Keine Anführungszeichen, kein "
+          "Punkt am Ende, keine Vorrede. Antworte mit NUR dem Titel.",
+    "en": "Give a short, concrete title for this meeting — 3 to 8 words naming "
+          "the core topic. No quotes, no trailing period, no preamble. Respond "
+          "with ONLY the title.",
+}
+
 
 def default_prompt(language: Optional[str] = None) -> str:
     """The default, user-editable summarization instruction for a language."""
@@ -583,3 +615,53 @@ def summarize(
     partials = [_run(f"{instruction}\n\n{label}:\n{p}", reduce_budget) for p in parts]
     reduce_instr = _REDUCE.get(lang, _REDUCE["en"])
     return _run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget)
+
+
+def generate_title(
+    text: str,
+    model: Optional[str] = None,
+    language: Optional[str] = None,
+) -> str:
+    """Generate a short meeting title from ``text`` (a summary or transcript).
+
+    Uses the same local MLX model as :func:`summarize`. Returns a single
+    cleaned-up line; ``""`` if unavailable or the input is empty.
+    """
+    if not available():
+        raise RuntimeError("Title generation needs mlx-lm: pip install mlx-lm")
+    if not text.strip():
+        return ""
+
+    from mlx_lm import generate, load
+
+    repo = resolve_model(model)
+    thinks = model_thinks(model)
+    lm, tokenizer = load(repo)
+    lang = language or ""
+    system = _SYSTEM.get(lang, _SYSTEM["en"])
+    instruction = _TITLE_INSTRUCTION.get(lang, _TITLE_INSTRUCTION["en"])
+    label = _TRANSCRIPT_LABEL.get(lang, "Transcript")
+
+    # A title only needs a handful of words; keep the model focused on the start
+    # of the content so a long meeting stays cheap.
+    snippet = text.strip()[:6000]
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": f"{instruction}\n\n{label}:\n{snippet}"}]
+    try:
+        chat = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, enable_thinking=thinks)
+    except TypeError:
+        chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+    max_tokens = 40 + (4000 if thinks else 0)
+    raw = generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens, verbose=False)
+    return _clean_title(_strip_thinking(raw))
+
+
+def _clean_title(text: str) -> str:
+    """Reduce model output to a single, filename-friendly title line."""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    # Drop common lead-ins, surrounding quotes/markdown and a trailing period.
+    line = re.sub(r'^(title|titel)\s*[:\-]\s*', "", line, flags=re.IGNORECASE)
+    # Strip surrounding quotes/markdown and trailing punctuation together so a
+    # model that emits e.g. "Q3 Budget Review". loses both the period and quote.
+    return line.strip().strip('"\'`*#.').strip()
