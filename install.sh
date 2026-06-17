@@ -27,6 +27,27 @@ case "$(uname -m)" in
   *) die "Unsupported architecture: $(uname -m)" ;;
 esac
 
+# --- 0. Refuse TCC-protected install locations -----------------------------
+# macOS guards ~/Downloads, ~/Desktop and ~/Documents (TCC). The login item we
+# register is launched by launchd, which does NOT inherit Terminal's access to
+# those folders — so it can't even read the venv's pyvenv.cfg and crashes at
+# startup (the menu-bar icon just silently disappears). Bail out early with a
+# fix rather than install something that will vanish on next login.
+case "$ROOT/" in
+  "$HOME/Downloads/"*|"$HOME/Desktop/"*|"$HOME/Documents/"*)
+    SAFE="$HOME/$(basename "$ROOT")"
+    die "meetre is in a macOS-protected folder and would crash at login:
+    $ROOT
+
+  ~/Downloads, ~/Desktop and ~/Documents block background apps (login items)
+  from reading their files, so the menu bar would just disappear.
+
+  Move it out and re-run, e.g.:
+    mv \"$ROOT\" \"$SAFE\"
+    cd \"$SAFE\" && bash install.sh"
+    ;;
+esac
+
 # --- 1. Python (>= 3.9) -----------------------------------------------------
 find_python() {
   for c in python3.12 python3.11 python3.10 python3; do

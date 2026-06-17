@@ -17,14 +17,21 @@ supported for the full pipeline.
 No git or admin required — one line downloads and installs everything:
 
 ```bash
-curl -fsSL https://github.com/maxlkatze/meetre/archive/refs/heads/main.tar.gz | tar -xz && cd meetre-main && bash install.sh
+cd ~ && curl -fsSL https://github.com/maxlkatze/meetre/archive/refs/heads/main.tar.gz | tar -xz && cd meetre-main && bash install.sh
 ```
 
 Already have git? You can clone instead:
 
 ```bash
-git clone https://github.com/maxlkatze/meetre.git && cd meetre && bash install.sh
+cd ~ && git clone https://github.com/maxlkatze/meetre.git && cd meetre && bash install.sh
 ```
+
+> ⚠️ **Don't install into `~/Downloads`, `~/Desktop` or `~/Documents`.** macOS
+> privacy protection (TCC) blocks background apps from reading those folders, so
+> the login item can't start and the `✦` menu-bar icon silently disappears after
+> launch or at the next login. The commands above install into your home folder
+> (`~/meetre-main` / `~/meetre`); a plain folder like `~/meetre` is ideal. The
+> installer refuses these protected locations and tells you how to move out.
 
 The installer needs no admin password. It uses your existing `python3`/`git` if
 present, otherwise downloads a **local, relocatable Python** and a **local git**
