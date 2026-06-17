@@ -92,6 +92,56 @@ def transcribe(
     )
 
 
+# Even out loudness before transcription so a soft-spoken or distant participant
+# is brought up to the level of louder speakers. This is applied only to the
+# audio fed to Whisper — the saved recording and the per-stem energy used for
+# speaker attribution stay untouched.
+NORMALIZE_FOR_ASR = True
+
+
+def normalize_for_asr(data, sr=16_000):
+    """Gated automatic gain control: boost quiet speech and tame loud peaks,
+    without amplifying silence/noise (which makes Whisper hallucinate).
+
+    Compresses the dynamic range frame by frame with a smoothed, clamped gain
+    curve, then peak-normalises into headroom. Returns float32 in [-1, 1].
+    """
+    import numpy as np
+
+    n = len(data)
+    if n == 0:
+        return np.asarray(data, dtype="float32")
+    data = (np.asarray(data, dtype="float32") - float(np.mean(data)))
+    if float(np.max(np.abs(data))) < 1e-5:
+        return data  # essentially silence — leave it alone
+
+    frame = max(1, int(sr * 0.02))                 # 20 ms frames
+    pad = (-n) % frame
+    padded = np.concatenate([data, np.zeros(pad, dtype="float32")]) if pad else data
+    frames = padded.reshape(-1, frame)
+    rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-12)
+
+    # Noise floor: just above the quietest frames so hiss isn't pumped up.
+    floor = max(float(np.percentile(rms, 15)) * 1.5, 10 ** (-45 / 20))
+    target, max_gain, min_gain = 0.12, 8.0, 0.4    # ~-18 dBFS, +18 dB / -8 dB
+
+    gain = np.clip(target / np.maximum(rms, 1e-6), min_gain, max_gain)
+    quiet = rms <= floor
+    gain[quiet] = np.minimum(gain[quiet], 1.0)      # never boost the noise floor
+
+    # Smooth the gain curve (~150 ms) so it doesn't pump between frames.
+    win = max(1, int(0.15 / 0.02))
+    if win > 1:
+        kernel = np.ones(win, dtype="float32") / win
+        gain = np.convolve(gain, kernel, mode="same")
+
+    out = data * np.repeat(gain, frame)[:n]
+    out_peak = float(np.max(np.abs(out)))
+    if out_peak > 0:
+        out *= 0.97 / out_peak                      # use headroom, avoid clipping
+    return np.clip(out, -1.0, 1.0).astype("float32")
+
+
 def _load_audio_16k(audio_path):
     """Read a WAV into a mono float32 array at 16 kHz, without needing ffmpeg."""
     import numpy as np
@@ -106,6 +156,8 @@ def _load_audio_16k(audio_path):
             np.linspace(0, len(data), n, endpoint=False),
             np.arange(len(data)), data,
         ).astype("float32")
+    if NORMALIZE_FOR_ASR:
+        data = normalize_for_asr(data, 16_000)
     return np.ascontiguousarray(data, dtype="float32")
 
 

@@ -139,6 +139,12 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
         NSBackingStoreBuffered, False,
     )
     win.setTitle_("meetre — recording settings")
+    # A programmatically created NSWindow defaults to releasedWhenClosed=True, so
+    # AppKit releases it on close() / the red close button while pyobjc still
+    # holds it (via the controller below). The second time the window is opened
+    # the previous controller is GC'd and over-releases the already-freed window
+    # → crash. Let Python own the lifetime instead.
+    win.setReleasedWhenClosed_(False)
     win.center()
     content = win.contentView()
 
@@ -268,6 +274,7 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
     # The controller class is defined ONCE (Obj-C class names are global); each
     # window attaches its own callbacks as plain Python attributes.
     ctrl = _settings_controller_class().alloc().init()
+    ctrl.win = win  # tie window lifetime to the controller the caller retains
     ctrl.on_slider = lambda n: spk_label.setStringValue_(spk_text(n))
     ctrl.on_start = _collect_and_start
     ctrl.on_cancel = lambda: win.close()
@@ -939,6 +946,13 @@ class MeetreApp(rumps.App if rumps else object):
 
 def run():
     _require_rumps()
+    # Capture native segfaults and uncaught exceptions to <repo>/crashlogs/.
+    try:
+        from . import crashlog
+
+        crashlog.install()
+    except Exception:  # noqa: BLE001
+        pass
     # Run as a menu-bar-only accessory: no Dock icon, no Python app window.
     try:
         from AppKit import NSApplication

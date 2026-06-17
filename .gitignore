@@ -2,6 +2,9 @@
 audio_backup/
 transcripts/
 
+# Crash / fault logs (local diagnostics)
+crashlogs/
+
 # Local Python environment & runtimes
 .venv/
 .runtime/

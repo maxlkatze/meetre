@@ -66,6 +66,10 @@ No audio or text leaves the machine. No accounts, no API keys.
 - Microphone and system audio, mixed into one track. System audio is captured
   natively via ScreenCaptureKit, so no BlackHole or loopback driver is needed.
 - MLX transcription, the fastest Whisper backend on Apple Silicon.
+- Automatic loudness levelling before transcription: soft-spoken or distant
+  participants are boosted to match louder speakers (gated so silence and
+  background noise aren't amplified), which improves accuracy on quiet voices.
+  The saved recording stays untouched.
 - German by default, with multilingual and auto-detect support.
 - Speaker detection with an optional headcount hint (`auto`, `4`, or `3-6`).
 - Local LLM summaries with a fully editable prompt. Newest models built in:
@@ -266,7 +270,7 @@ remote configured.
 
 ```
 recorder.py      mic (sounddevice) + system audio (ScreenCaptureKit Swift helper) -> mixed 16 kHz WAV
-transcriber.py   MLX Whisper (large-v3-turbo); pyannote diarization
+transcriber.py   MLX Whisper (large-v3-turbo); gated AGC level + pyannote diarization
 summarizer.py    MLX-LM (Qwen3.5 reasoning / Gemma 4) with an editable prompt
 transcript.py    Markdown writer (summary + timestamped, speaker-labelled body)
 integrations.py  Apple Notes (AppleScript)
