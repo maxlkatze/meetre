@@ -1,0 +1,17 @@
+# Recordings & generated output (local data, not source)
+audio_backup/
+transcripts/
+
+# Local Python environment & runtimes
+.venv/
+.runtime/
+
+# Build / packaging
+*.egg-info/
+__pycache__/
+*.pyc
+build/
+dist/
+
+# macOS
+.DS_Store

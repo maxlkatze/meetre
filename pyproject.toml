@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meetre"
+version = "0.1.0"
+description = "Record macOS audio and turn meetings into transcripts with speaker association."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Agendaro" }]
+dependencies = [
+    "rich>=13.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24",
+    "soundfile>=0.12",
+    # Apple Silicon: Metal-accelerated transcription via MLX.
+    "mlx-whisper>=0.4.0",
+    # Local LLM summarization (Qwen3-8B-4bit etc.) via MLX.
+    "mlx-lm>=0.20.0",
+]
+
+[project.optional-dependencies]
+# Portable CPU fallback (Intel Macs, or non-Apple-Silicon).
+cpu = ["faster-whisper>=1.0.0"]
+# macOS menu-bar app (status-bar icon, settings popup with pickers + slider).
+menubar = [
+    "rumps>=0.4.0",
+    "pyobjc-framework-Cocoa>=10.0",
+]
+# Speaker diarization ("person detection"). Heavy; pulls in torch + pyannote.
+# huggingface_hub is pinned <1.0 because pyannote.audio 3.x still calls the
+# removed `use_auth_token` argument.
+persons = [
+    "pyannote.audio>=3.1",
+    "torch>=2.0",
+    "huggingface_hub<1.0",
+]
+
+[project.scripts]
+meetre = "meetre.cli:main"
+
+[project.gui-scripts]
+meetre-menubar = "meetre.menubar:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the Swift system-audio helper source; it is compiled on first use.
+meetre = ["helpers/*.swift"]
