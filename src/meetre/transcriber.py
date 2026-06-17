@@ -10,9 +10,15 @@ Backends, tried in order of preference:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+# pyannote.audio 4.x ships OpenTelemetry usage metrics that phone home. meetre is
+# local-only, so disable them before pyannote is imported (setdefault keeps it
+# overridable for anyone who explicitly opts in).
+os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
 
 # Map friendly model sizes to the HuggingFace repos MLX uses.
 # large-v3-turbo is the recommended default on Apple Silicon: near-large-v3
@@ -322,7 +328,8 @@ def diarization_ready(hf_token: Optional[str]) -> Tuple[bool, Optional[str]]:
 
 
 # pyannote diarization pipeline. "community-1" (ships with pyannote.audio 4.x)
-# is markedly more accurate than the older 3.1 pipeline.
+# is markedly more accurate than the older 3.1 pipeline and runs fully on-device.
+# We deliberately do NOT use the cloud "precision-2" variant (it uploads audio).
 _DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 
 # Friendlier labels for pyannote's internal step names (shown on the progress bar).
@@ -377,6 +384,15 @@ def diarize_turns(
             "Person detection needs the 'persons' extra: pip install 'meetre[persons]'"
         ) from e
 
+    # Belt-and-suspenders: also disable telemetry via the API in case pyannote
+    # was imported before our env var took effect.
+    try:
+        from pyannote.audio.telemetry.metrics import set_telemetry_metrics
+
+        set_telemetry_metrics(False)
+    except Exception:  # noqa: BLE001
+        pass
+
     if not hf_token:
         raise RuntimeError(
             "Person detection needs a HuggingFace token. Set it via "
@@ -414,7 +430,17 @@ def diarize_turns(
         if max_speakers:
             kwargs["max_speakers"] = max_speakers
     hook = _pyannote_hook(progress)
-    output = pipeline(str(audio_path), hook=hook, **kwargs)
+    # Feed pyannote a pre-loaded waveform instead of a path: pyannote.audio 4.x
+    # decodes files via torchcodec (needs FFmpeg), which meetre doesn't ship.
+    # We already read audio with soundfile, so hand it the tensor directly.
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    waveform = torch.from_numpy(np.ascontiguousarray(data, dtype="float32")).unsqueeze(0)
+    output = pipeline({"waveform": waveform, "sample_rate": sr}, hook=hook, **kwargs)
     # pyannote.audio 4.x (community-1) returns a result object exposing the
     # Annotation under `.speaker_diarization`; 3.x returned the Annotation
     # directly. Handle both.

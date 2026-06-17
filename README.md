@@ -207,8 +207,11 @@ meetre speakers 3-6                # headcount hint for the remote side
 
 Speaker detection uses the `pyannote/speaker-diarization-community-1` pipeline
 (pyannote.audio 4.x) — accept its model terms at
-`huggingface.co/pyannote/speaker-diarization-community-1` first. Live progress
-(segmenting / analyzing voices / assigning) shows on the menu-bar bar.
+`huggingface.co/pyannote/speaker-diarization-community-1` first. It runs fully
+on-device (not the cloud `precision-2` variant), audio is fed straight from
+memory (no FFmpeg/torchcodec needed), and pyannote's usage telemetry is
+disabled. Live progress (segmenting / analyzing voices / assigning) shows on the
+menu-bar bar.
 
 ## Local summaries
 
@@ -250,8 +253,10 @@ The prompt is editable in the menu bar or via
 ## Privacy
 
 Recording, transcription, diarization and summarization all run locally via MLX
-and PyTorch. No audio or text is uploaded. The only network access is the
-one-time model downloads from HuggingFace and the optional `git pull` update.
+and PyTorch. No audio or text is uploaded. pyannote.audio's usage telemetry is
+disabled, and the cloud diarization variant is never used. The only network
+access is the one-time model downloads from HuggingFace and the optional
+`git pull` update.
 
 ## Configuration
 
