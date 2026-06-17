@@ -55,7 +55,7 @@ IDLE_TITLE = "✦"
 SPINNER = ["✦", "✧", "⊹", "✧"]
 
 
-def _ensure_bundle_identifier(bundle_id: str = "com.agendaro.meetre") -> None:
+def _ensure_bundle_identifier(bundle_id: str = "net.cubedpixels.meetre") -> None:
     """Give the process a bundle identifier so notifications work.
 
     Run unbundled as ``python -m meetre.menubar``, the main bundle has no
