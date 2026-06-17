@@ -445,12 +445,11 @@ class MeetreApp(rumps.App if rumps else object):
         summary_menu.add(auto_it)
         for alias, spec, fits in summarizer.model_catalog():
             inst = " ✓" if summarizer.is_installed(alias) else ""
-            think = " 🧠" if spec.thinks else ""
             if fits:
-                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){think}{inst}",
+                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){inst}",
                                     callback=self._make_summary_cb(alias))
             else:
-                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB){think} — needs more RAM")
+                it = rumps.MenuItem(f"{alias} (~{spec.size_gb:.0f} GB) — needs more RAM")
                 it.set_callback(None)  # disabled / grayed out
             it.state = 1 if (self.cfg.auto_summarize and self.cfg.summary_model == alias) else 0
             summary_menu.add(it)
@@ -1008,6 +1007,16 @@ class MeetreApp(rumps.App if rumps else object):
 
 def run():
     _require_rumps()
+    # Re-exec from inside meetre.app so notifications/app switcher show "meetre"
+    # with our icon instead of "python3.12". No-op once already in the bundle;
+    # if it can't build, we keep running in place. Must happen before any
+    # AppKit/notification setup.
+    try:
+        from . import bundle
+
+        bundle.relaunch_into_bundle()
+    except Exception:  # noqa: BLE001
+        pass
     # Capture native segfaults and uncaught exceptions to <repo>/crashlogs/.
     try:
         from . import crashlog

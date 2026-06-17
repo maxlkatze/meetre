@@ -54,8 +54,8 @@ Zoom, Meet, Teams, etc.), then:
 
 1. Transcribes locally with Whisper `large-v3-turbo` via MLX (Metal-accelerated).
 2. Optionally labels speakers using `pyannote` diarization.
-3. Summarises with a local reasoning LLM (Qwen3.5 / Gemma 4, auto-picked for your
-   RAM) into Zusammenfassung / Entscheidungen / Aufgaben / Offene Fragen.
+3. Summarises with a local LLM (Qwen3.5 / Gemma 4, auto-picked for your RAM)
+   into Zusammenfassung / Entscheidungen / Aufgaben / Offene Fragen.
 4. Writes a Markdown transcript and an MP3 backup, and saves the summary to Apple
    Notes.
 
@@ -73,8 +73,8 @@ No audio or text leaves the machine. No accounts, no API keys.
 - German by default, with multilingual and auto-detect support.
 - Speaker detection with an optional headcount hint (`auto`, `4`, or `3-6`).
 - Local LLM summaries with a fully editable prompt. Newest models built in:
-  Qwen3.5 (hybrid **reasoning** — thinks before it answers) and Gemma 4
-  (strongest multilingual). `auto` picks the best that fits your machine.
+  Qwen3.5 and Gemma 4 (strongest multilingual), run in fast direct mode.
+  `auto` picks the best that fits your machine.
 - Menu-bar app with a real image icon, live status, model-download progress,
   native notifications when a meeting is ready, and a settings popup.
 - An **About meetre** submenu (version, check for updates, restart, start at
@@ -104,12 +104,11 @@ dependencies 1–3 GB (the `persons` extra adds PyTorch).
 
 Real-time factor is minutes of audio transcribed per minute of compute (higher is
 faster). Summary time is for a typical 30-minute meeting with a small/mid summary
-model; reasoning models (Qwen3.5) trade a little extra time for noticeably better
-structure. The first run also downloads the models once.
+model. The first run also downloads the models once.
 
 | Chip | RAM | Transcribe (large-v3-turbo) | Summary | Auto summary model | Notes |
 |------|-----|------------------------------|---------|--------------------|-------|
-| M1 / M1 Pro | 8–16 GB | ~6–9x real-time | ~10–25 s | `qwen3.5-4b` / `gemma4-12b` | Great for transcripts; reasoning fits from 16 GB |
+| M1 / M1 Pro | 8–16 GB | ~6–9x real-time | ~10–25 s | `qwen3.5-4b` / `gemma4-12b` | Great for transcripts; full pipeline from 16 GB |
 | M2 / M2 Pro/Max | 8–32 GB | ~8–12x real-time | ~8–20 s | `gemma4-12b` / `qwen3.5-9b` | Full pipeline runs smoothly |
 | M3 / M3 Pro/Max | 16–36 GB | ~10–14x real-time | ~8–18 s | `qwen3.5-9b` / `qwen3.5-35b` | Comfortable everywhere |
 | M4 / M4 Pro/Max | 16–48 GB | ~12–16x real-time | ~6–15 s | `qwen3.5-35b` | Fast |
@@ -144,7 +143,7 @@ Click the icon:
 - **Stop** — finishes the recording and runs the pipeline in the background.
 - **Model / Language / Summary model / Speakers** — quick pickers. The summary
   picker is sized for your machine: too-large models are greyed out, `✓` marks
-  downloaded ones, and `🧠` marks reasoning models.
+  downloaded ones.
 - **System audio** and **Person detection** toggles.
 - **Settings…**, **Summarize last → Apple Notes (local)**, **Open transcripts
   folder**, and **Downloaded models** (click one to uninstall and free space).
@@ -216,30 +215,29 @@ the transcript and saved to Apple Notes, generated once. Leave the model on
 
 Built-in models (current generation, June 2026):
 
-| Alias | Repo | ~Size | Reasons | Best for |
-|-------|------|-------|:------:|----------|
-| `qwen3.5-2b` | `Qwen3.5-2B-MLX-4bit` | 1.3 GB | 🧠 | 8 GB Macs, fastest |
-| `qwen3.5-4b` | `Qwen3.5-4B-MLX-4bit` | 2.4 GB | 🧠 | small + reasoning |
-| `gemma4-e4b` | `gemma-4-e4b-it-4bit` | 3.4 GB | | minimal, 140+ languages |
-| `qwen3.5-9b` | `Qwen3.5-9B-4bit` | 5.0 GB | 🧠 | balanced, fits 16 GB |
-| `gemma4-12b` | `gemma-4-12B-4bit` | 6.8 GB | | strong multilingual |
-| `mistral-24b` | `Mistral-Small-3.2-24B-…-4bit` | 13.3 GB | | concise all-rounder |
-| `gemma4-26b` | `gemma-4-26b-a4b-it-4bit` | 14.5 GB | | best German / multilingual |
-| `qwen3.5-27b` | `Qwen3.5-27B-4bit` | 15 GB | 🧠 | top dense reasoning |
-| `qwen3.5-35b` | `Qwen3.5-35B-A3B-4bit` | 20 GB | 🧠 | best all-round (MoE, fast) |
-| `qwen3.5-122b` | `Qwen3.5-122B-A10B-MLX-4bit` | 66 GB | 🧠 | high-RAM Studio |
-| `qwen3.5-397b` | `Qwen3.5-397B-A17B-4bit` | 210 GB | 🧠 | Mac Studio Ultra only |
+| Alias | Repo | ~Size | Best for |
+|-------|------|-------|----------|
+| `qwen3.5-2b` | `Qwen3.5-2B-MLX-4bit` | 1.3 GB | 8 GB Macs, fastest |
+| `qwen3.5-4b` | `Qwen3.5-4B-MLX-4bit` | 2.4 GB | small + fast |
+| `gemma4-e4b` | `gemma-4-e4b-it-4bit` | 3.4 GB | minimal, 140+ languages |
+| `qwen3.5-9b` | `Qwen3.5-9B-4bit` | 5.0 GB | balanced, fits 16 GB |
+| `gemma4-12b` | `gemma-4-12B-4bit` | 6.8 GB | strong multilingual |
+| `mistral-24b` | `Mistral-Small-3.2-24B-…-4bit` | 13.3 GB | concise all-rounder |
+| `gemma4-26b` | `gemma-4-26b-a4b-it-4bit` | 14.5 GB | best German / multilingual |
+| `qwen3.5-27b` | `Qwen3.5-27B-4bit` | 15 GB | top dense quality |
+| `qwen3.5-35b` | `Qwen3.5-35B-A3B-4bit` | 20 GB | best all-round (MoE, fast) |
+| `qwen3.5-122b` | `Qwen3.5-122B-A10B-MLX-4bit` | 66 GB | high-RAM Studio |
+| `qwen3.5-397b` | `Qwen3.5-397B-A17B-4bit` | 210 GB | Mac Studio Ultra only |
 
-🧠 = hybrid **reasoning** model — it thinks through the meeting before writing,
-which produces sharper structure and better task extraction (the hidden
-reasoning is stripped from the saved summary). Older `qwen3-*` / `gemma3-*`
-aliases still resolve for existing configs.
+All models answer directly (no slow hidden reasoning pass) for fast, reliable
+summaries. Older `qwen3-*` / `gemma3-*` aliases still resolve for existing
+configs.
 
 ```bash
 meetre summary-model             # list models, sizes, and what fits your Mac
 meetre summary-model auto        # best that fits (default)
 meetre summary-model qwen3.5-35b # best all-round on 32 GB+
-meetre summary-model qwen3.5-4b  # light + reasoning for 8 GB
+meetre summary-model qwen3.5-4b  # light + fast for 8 GB
 meetre summary-model off         # transcript only
 ```
 
@@ -271,7 +269,7 @@ remote configured.
 ```
 recorder.py      mic (sounddevice) + system audio (ScreenCaptureKit Swift helper) -> mixed 16 kHz WAV
 transcriber.py   MLX Whisper (large-v3-turbo); gated AGC level + pyannote diarization
-summarizer.py    MLX-LM (Qwen3.5 reasoning / Gemma 4) with an editable prompt
+summarizer.py    MLX-LM (Qwen3.5 / Gemma 4, direct mode) with an editable prompt
 transcript.py    Markdown writer (summary + timestamped, speaker-labelled body)
 integrations.py  Apple Notes (AppleScript)
 menubar.py       rumps + AppKit status-bar app

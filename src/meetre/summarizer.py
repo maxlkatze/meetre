@@ -26,18 +26,19 @@ from typing import Dict, List, Optional, Tuple
 ModelSpec = namedtuple("ModelSpec", "repo size_gb note thinks")
 ModelSpec.__new__.__defaults__ = (False,)  # thinks defaults to False
 
-# Current generation (June 2026): Qwen3.5 + Gemma 4. Qwen3.5 are hybrid models —
-# they reason step by step before answering, which produces noticeably better
-# structured German summaries; Gemma 4 has the strongest multilingual coverage.
+# Current generation (June 2026): Qwen3.5 + Gemma 4. Qwen3.5 are hybrid models
+# but we run them in direct (non-reasoning) mode — for summarization the hidden
+# reasoning pass adds latency and can truncate/leak with no quality win, so all
+# models below answer directly. Gemma 4 has the strongest multilingual coverage.
 SUMMARY_MODELS = {
-    # --- Qwen3.5 (hybrid reasoning) -------------------------------------
-    "qwen3.5-397b":  ModelSpec("mlx-community/Qwen3.5-397B-A17B-4bit", 210.0, "flagship MoE — Mac Studio Ultra only", True),
-    "qwen3.5-122b":  ModelSpec("mlx-community/Qwen3.5-122B-A10B-MLX-4bit", 66.0, "large MoE — high-RAM Studio", True),
-    "qwen3.5-35b":   ModelSpec("mlx-community/Qwen3.5-35B-A3B-4bit", 19.6, "MoE, ~3B active — reasons + fast, best all-round", True),
-    "qwen3.5-27b":   ModelSpec("mlx-community/Qwen3.5-27B-4bit", 15.0, "dense — top reasoning quality", True),
-    "qwen3.5-9b":    ModelSpec("mlx-community/Qwen3.5-9B-4bit", 5.0, "balanced — reasons, fits 16 GB", True),
-    "qwen3.5-4b":    ModelSpec("mlx-community/Qwen3.5-4B-MLX-4bit", 2.4, "small reasoner — fast", True),
-    "qwen3.5-2b":    ModelSpec("mlx-community/Qwen3.5-2B-MLX-4bit", 1.3, "minimal — fastest", True),
+    # --- Qwen3.5 (run in direct mode) ----------------------------------
+    "qwen3.5-397b":  ModelSpec("mlx-community/Qwen3.5-397B-A17B-4bit", 210.0, "flagship MoE — Mac Studio Ultra only"),
+    "qwen3.5-122b":  ModelSpec("mlx-community/Qwen3.5-122B-A10B-MLX-4bit", 66.0, "large MoE — high-RAM Studio"),
+    "qwen3.5-35b":   ModelSpec("mlx-community/Qwen3.5-35B-A3B-4bit", 19.6, "MoE, ~3B active — fast, best all-round"),
+    "qwen3.5-27b":   ModelSpec("mlx-community/Qwen3.5-27B-4bit", 15.0, "dense — top quality"),
+    "qwen3.5-9b":    ModelSpec("mlx-community/Qwen3.5-9B-4bit", 5.0, "balanced — fits 16 GB"),
+    "qwen3.5-4b":    ModelSpec("mlx-community/Qwen3.5-4B-MLX-4bit", 2.4, "small — fast"),
+    "qwen3.5-2b":    ModelSpec("mlx-community/Qwen3.5-2B-MLX-4bit", 1.3, "minimal — fastest"),
     # --- Gemma 4 (instruction, strongest multilingual) -----------------
     "gemma4-26b":    ModelSpec("mlx-community/gemma-4-26b-a4b-it-4bit", 14.5, "MoE — excellent German / 140+ languages"),
     "gemma4-12b":    ModelSpec("mlx-community/gemma-4-12B-4bit", 6.8, "dense — strong multilingual, lighter"),
@@ -516,25 +517,37 @@ def summarize(
     label = _TRANSCRIPT_LABEL.get(lang, "Transcript")
 
     # Reasoning models spend tokens on a hidden <think> pass before the answer,
-    # so they need far more headroom — too small a budget and generation stops
-    # mid-thought, leaving an empty summary after stripping. Non-thinking models
-    # answer directly and stay tight.
+    # so they need far more headroom. Non-thinking models answer directly.
     answer_budget = 900
     reduce_budget = 500
-    think_budget = 2200  # extra tokens reserved for the reasoning pass
+    think_budget = 4000  # extra tokens reserved for the reasoning pass
 
-    def _run(user: str, max_tokens: int) -> str:
+    def _generate(user: str, max_tokens: int, use_thinking: bool) -> str:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
         try:
             chat = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, enable_thinking=thinks
+                messages, add_generation_prompt=True, enable_thinking=use_thinking
             )
         except TypeError:
             chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-        budget = max_tokens + (think_budget if thinks else 0)
-        out = generate(lm, tokenizer, prompt=chat, max_tokens=budget, verbose=False)
-        return _strip_thinking(out)
+        return generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens, verbose=False)
+
+    def _run(user: str, max_tokens: int) -> str:
+        if thinks:
+            raw = _generate(user, max_tokens + think_budget, True)
+            # A reasoning model's answer follows the closing </think>. If the
+            # tag is missing the model ran out of budget mid-thought (no answer
+            # was produced) — never dump the raw reasoning; fall back instead.
+            answer = raw.rsplit("</think>", 1)[-1].strip() if "</think>" in raw else ""
+            if answer:
+                return _strip_thinking(answer)
+            # Reasoning truncated or produced nothing usable: redo the call with
+            # the thinking pass off so the model answers directly.
+            raw = _generate(user, max_tokens, False)
+        else:
+            raw = _generate(user, max_tokens, False)
+        return _strip_thinking(raw)
 
     parts = _chunks(text)
     if len(parts) == 1:

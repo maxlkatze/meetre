@@ -19,3 +19,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# Generated app bundle wrapper (built on launch for notification attribution)
+meetre.app/
