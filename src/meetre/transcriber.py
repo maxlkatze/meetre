@@ -259,9 +259,10 @@ def load_parakeet(repo: str):
     try:
         import parakeet_mlx
         from parakeet_mlx import from_pretrained
-    except ImportError as e:  # pragma: no cover - optional extra
+    except ImportError as e:  # pragma: no cover
         raise RuntimeError(
-            "Parakeet needs the 'parakeet' extra: pip install 'meetre[parakeet]'"
+            "parakeet-mlx is missing — reinstall meetre to pick it up: "
+            "pip install -e . (or rerun install.sh)"
         ) from e
     # parakeet-mlx decodes audio with ffmpeg; meetre ships none, so route its
     # file loading through soundfile instead.

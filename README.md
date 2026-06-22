@@ -128,10 +128,9 @@ typically transcribes in about 2–4 minutes on most M-series Macs.
 If you prefer not to use `install.sh`:
 
 ```bash
-pip install -e .            # core, including MLX transcription + summaries
+pip install -e .            # core: MLX transcription (Whisper + Parakeet) + summaries
 pip install -e '.[menubar]' # the macOS menu-bar app (rumps + pyobjc)
 pip install -e '.[persons]' # optional speaker diarization (pyannote 4.x)
-pip install -e '.[parakeet]'# optional Parakeet TDT v3 transcription model
 pip install -e '.[align]'   # optional VAD + phoneme word-alignment (Whisper)
 pip install -e '.[cpu]'     # faster-whisper fallback for non-Apple-Silicon
 ```

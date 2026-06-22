@@ -20,14 +20,18 @@ dependencies = [
     # architectures used by the current summary-model lineup; older mlx-lm
     # fails to load those repos with "Model type gemma4 not supported".
     "mlx-lm>=0.31.3",
+    # Alternative transcription backend: NVIDIA Parakeet TDT v3 on MLX
+    # (multilingual, very fast). Selectable as the "parakeet-tdt-v3" model in the
+    # menu/config — shipped by default so picking it needs no extra install.
+    "parakeet-mlx>=0.4",
 ]
 
 [project.optional-dependencies]
 # Portable CPU fallback (Intel Macs, or non-Apple-Silicon).
 cpu = ["faster-whisper>=1.0.0"]
-# Alternative transcription backend: NVIDIA Parakeet TDT v3 on MLX (multilingual,
-# very fast). Selectable as the "parakeet-tdt-v3" model.
-parakeet = ["parakeet-mlx>=0.4"]
+# Parakeet now ships in the base deps; kept as a no-op alias so existing
+# `pip install 'meetre[parakeet]'` invocations keep working.
+parakeet = []
 # VAD silence filtering (Silero) + phoneme word-alignment (torchaudio MMS_FA)
 # for the Whisper path. Runs on-device.
 align = [
