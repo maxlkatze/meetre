@@ -123,8 +123,22 @@ else
 fi
 
 # --- 3. Virtual environment + dependencies ---------------------------------
-info "Creating virtual environment (.venv)…"
-"$PY" -m venv .venv
+# Re-running install.sh is the common "update" path, so this MUST be safe to run
+# over an existing install: reuse a working .venv (keeping its downloaded models
+# and state) instead of recreating it. Only build a fresh venv when none exists
+# or the current one is broken — and then move the old one aside to .venv.old
+# rather than clobbering it in place.
+if [ -x ".venv/bin/python" ] && .venv/bin/python -c "import sys" >/dev/null 2>&1; then
+  ok "Reusing existing virtual environment (.venv)"
+else
+  if [ -e ".venv" ]; then
+    warn "Existing .venv is broken — moving it aside to .venv.old"
+    rm -rf .venv.old
+    mv .venv .venv.old
+  fi
+  info "Creating virtual environment (.venv)…"
+  "$PY" -m venv .venv
+fi
 .venv/bin/python -m pip install -q --upgrade pip wheel
 info "Installing meetre + menu-bar app (this downloads MLX models on first use)…"
 .venv/bin/pip install -q -e ".[menubar]"
