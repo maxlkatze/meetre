@@ -97,6 +97,7 @@ def _transcribe_and_write(
                 hf_token=cfg.hf_token, num_speakers=cfg.num_speakers,
                 min_speakers=cfg.min_speakers, max_speakers=cfg.max_speakers,
                 vad=cfg.vad, word_align=cfg.word_timestamps,
+                merged_analysis=cfg.merged_analysis,
             )
         use_persons = True  # we always have at least Me vs. remote
         if not segments:
@@ -678,7 +679,7 @@ def do_speakers(cfg: Config, spec: Optional[str] = None) -> None:
 def do_config(cfg: Config, key: Optional[str] = None, value: Optional[str] = None) -> None:
     editable = ["model", "language", "transcripts_dir", "audio_backup_dir",
                 "mic_device", "system_device", "capture_system", "native_system",
-                "person_detection", "num_speakers", "min_speakers",
+                "person_detection", "merged_analysis", "num_speakers", "min_speakers",
                 "max_speakers", "hf_token", "compute_type",
                 "summary_model", "auto_summarize", "auto_notes", "summary_prompt",
                 "auto_update"]

@@ -342,19 +342,29 @@ def transcribe_attributed(
     diar_progress=None,
     vad: bool = False,
     word_align: bool = False,
+    merged_analysis: bool = False,
 ) -> Tuple[List[Segment], str]:
     """Transcribe the mixed audio once, then attribute speakers from the stems.
 
     Timing comes from a single transcription of the mix (one clean timeline).
     Each segment is attributed to a side by comparing energy in the mic stem
     (you) vs the system stem (remote) over the segment window — the stems are
-    sample-aligned with the mix. With ``detect_speakers``, pyannote runs on each
+    sample-aligned with the mix.
+
+    With ``detect_speakers`` and ``merged_analysis=False``, pyannote runs on each
     stem separately so multiple local AND multiple remote speakers are split
-    (e.g. "Ich"/"Vor Ort 2" locally, "Sprecher 1/2" remotely).
+    (e.g. "Ich"/"Vor Ort 2" locally, "Sprecher 1/2" remotely). With
+    ``merged_analysis=True`` (the default in config) pyannote runs once on the
+    mixed audio and the same turns are reused for both sides — one analysis
+    instead of two.
+
+    Either way, a source that never exceeds a low decibel level (essentially
+    silent throughout) is skipped: it gets no segments and no analysis pass.
 
     ``progress`` is ``callable(seconds_done, total_seconds)`` for transcription;
     ``diar_progress`` is ``callable(label, fraction)`` for the pyannote steps.
     """
+    import numpy as np
     import soundfile as sf
 
     segments, backend = transcribe(mix_path, model, language, compute_type,
@@ -375,6 +385,18 @@ def transcribe_attributed(
     mic = _load(stems.get("mic"))
     system = _load(stems.get("system"))
 
+    # Drop sources that never exceed a low decibel level (peak below ~-45 dBFS):
+    # they captured nothing useful, so they get no segments and no analysis pass.
+    silence_floor = 10 ** (-45 / 20)
+
+    def _silent(arr):
+        return arr is None or float(np.max(np.abs(arr))) < silence_floor
+
+    if _silent(mic):
+        mic = None
+    if _silent(system):
+        system = None
+
     def _energy(arr, start, end):
         if arr is None:
             return 0.0
@@ -382,21 +404,40 @@ def transcribe_attributed(
         return _rms(arr[a:b]) if b > a else 0.0
 
     # 1) Attribute each segment to a side (you vs. remote) by which stem is
-    #    louder over the segment window.
+    #    louder over the segment window. With one side skipped (silent), every
+    #    segment falls to the side that actually recorded audio.
     mic_segs, sys_segs = [], []
     for seg in segments:
-        if _energy(mic, seg.start, seg.end) >= _energy(system, seg.start, seg.end):
+        if system is None:
+            mic_segs.append(seg)
+        elif mic is None:
+            sys_segs.append(seg)
+        elif _energy(mic, seg.start, seg.end) >= _energy(system, seg.start, seg.end):
             mic_segs.append(seg)
         else:
             sys_segs.append(seg)
 
-    # 2) Either split each side into individual people (pyannote per stem —
-    #    handles multiple local AND multiple remote speakers), or just label
-    #    the side.
-    if detect_speakers:
+    # 2) Split each side into individual people, or just label the side.
+    if detect_speakers and merged_analysis:
+        # One analysis on the mixed audio; reuse the same turns for both sides.
+        try:
+            turns = diarize_turns(mix_path, hf_token, num_speakers, min_speakers,
+                                  max_speakers, progress=diar_progress)
+        except RuntimeError:
+            turns = []
+        if turns:
+            _assign_side(mic_segs, turns, lbl["local"], lbl["local_multi"])
+            _assign_side(sys_segs, turns, lbl["remote"], lbl["remote_multi"])
+        else:
+            for s in mic_segs:
+                s.speaker = lbl["local"]
+            for s in sys_segs:
+                s.speaker = lbl["remote"]
+    elif detect_speakers:
+        # Per-stem analysis (pyannote on each source separately).
         try:
             mic_turns = diarize_turns(Path(stems["mic"]), hf_token, progress=diar_progress) \
-                if stems.get("mic") and mic is not None else []
+                if mic is not None else []
             _assign_side(mic_segs, mic_turns, lbl["local"], lbl["local_multi"])
         except RuntimeError:
             for s in mic_segs:
@@ -405,7 +446,7 @@ def transcribe_attributed(
             sys_turns = diarize_turns(Path(stems["system"]), hf_token,
                                       num_speakers, min_speakers, max_speakers,
                                       progress=diar_progress) \
-                if stems.get("system") and system is not None else []
+                if system is not None else []
             _assign_side(sys_segs, sys_turns, lbl["remote"], lbl["remote_multi"])
         except RuntimeError:
             for s in sys_segs:

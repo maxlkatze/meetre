@@ -273,6 +273,8 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
     sysaudio_cb = checkbox("Capture system audio (ScreenCaptureKit, other participants)",
                            next_y(40), cfg.capture_system)
     persons_cb = checkbox("Detect speakers (person detection)", next_y(28), cfg.person_detection)
+    merged_cb = checkbox("Analyze sources merged (one pass; skip silent sources)",
+                         next_y(28), cfg.merged_analysis)
     summarize_cb = checkbox("After: save summary + transcript to Apple Notes",
                             next_y(28), cfg.auto_notes)
 
@@ -315,6 +317,7 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
             "summary_model": summary_items[summary_pop.indexOfSelectedItem()][1],
             "capture_system": bool(sysaudio_cb.state()),
             "person_detection": bool(persons_cb.state()),
+            "merged_analysis": bool(merged_cb.state()),
             "summarize_after": bool(summarize_cb.state()),
             "speakers": int(slider.intValue()),
             "summary_prompt": str(prompt_tv.string()),
@@ -631,6 +634,8 @@ class MeetreApp(rumps.App if rumps else object):
                 self.cfg.summary_model = sm
         self.cfg.capture_system = values["capture_system"]
         self.cfg.person_detection = values["person_detection"]
+        if "merged_analysis" in values:
+            self.cfg.merged_analysis = values["merged_analysis"]
         # Persist the rest so the popup remembers state next time.
         if "summarize_after" in values:
             self.cfg.auto_notes = values["summarize_after"]
@@ -795,6 +800,7 @@ class MeetreApp(rumps.App if rumps else object):
                     min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers,
                     progress=self._tx_progress, diar_progress=self._progress,
                     vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
+                    merged_analysis=self.cfg.merged_analysis,
                 )
                 use_persons = True
             else:

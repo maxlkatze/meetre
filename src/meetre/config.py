@@ -31,6 +31,10 @@ class Config:
     language: Optional[str] = "de"
     # Whether to run speaker diarization ("person detection").
     person_detection: bool = False
+    # Analyze the merged mix in a single diarization pass instead of running
+    # pyannote separately on each source (mic / system). One analysis is faster;
+    # sources that never exceed a low decibel level are skipped entirely.
+    merged_analysis: bool = True
     # Exact number of participants (None = estimate). Takes priority over the
     # min/max range below when set.
     num_speakers: Optional[int] = None
