@@ -15,11 +15,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 RUNTIME="$ROOT/.runtime"
 
-bold() { printf "\033[1m%s\033[0m\n" "$1"; }
-info() { printf "\033[36m›\033[0m %s\n" "$1"; }
-ok()   { printf "\033[32m✓\033[0m %s\n" "$1"; }
-warn() { printf "\033[33m!\033[0m %s\n" "$1"; }
-die()  { printf "\033[31m✗ %s\033[0m\n" "$1"; exit 1; }
+# Log helpers write to stderr so they never pollute command substitution
+# (e.g. PY="$(install_local_python)" must capture ONLY the python path).
+bold() { printf "\033[1m%s\033[0m\n" "$1" >&2; }
+info() { printf "\033[36m›\033[0m %s\n" "$1" >&2; }
+ok()   { printf "\033[32m✓\033[0m %s\n" "$1" >&2; }
+warn() { printf "\033[33m!\033[0m %s\n" "$1" >&2; }
+die()  { printf "\033[31m✗ %s\033[0m\n" "$1" >&2; exit 1; }
 
 case "$(uname -m)" in
   arm64)  ARCH="aarch64" ;;
