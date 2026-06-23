@@ -522,6 +522,7 @@ class MeetreApp(rumps.App if rumps else object):
         self.startup_item.state = 1 if autostart.is_enabled() else 0
         about_menu.add(self.startup_item)
         about_menu.add(None)
+        about_menu.add(rumps.MenuItem("Uninstall meetre…", callback=self.on_uninstall))
         about_menu.add(rumps.MenuItem("Quit meetre", callback=rumps.quit_application))
 
         self.menu = [
@@ -1027,6 +1028,33 @@ class MeetreApp(rumps.App if rumps else object):
         elif interactive:
             err = result.get("error")
             self._notify("meetre", "Up to date", err or "Already on the latest version.")
+
+    def on_uninstall(self, sender=None):
+        """Remove meetre completely: login item, CLI shim, config/cache, folder."""
+        if self.state != "idle":
+            if rumps.alert(
+                title="Uninstall meetre?",
+                message="A recording or processing job is still running. "
+                        "Uninstall anyway and discard it?",
+                ok="Uninstall", cancel="Cancel",
+            ) != 1:
+                return
+
+        from . import uninstall
+
+        paths = "\n".join(f"  • {p}" for p in uninstall.targets())
+        resp = rumps.alert(
+            title="Uninstall meetre?",
+            message="This permanently deletes:\n\n" + paths + "\n\n"
+                    "Any transcripts and recordings saved inside the meetre "
+                    "folder will be deleted too. This cannot be undone.",
+            ok="Uninstall", cancel="Cancel",
+        )
+        if resp != 1:
+            return
+
+        uninstall.run()
+        rumps.quit_application()
 
     def on_toggle_startup(self, sender=None):
         from . import autostart
