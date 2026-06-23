@@ -1000,23 +1000,41 @@ class MeetreApp(rumps.App if rumps else object):
             ) != 1:
                 return
         import os
+        import subprocess
         import sys
 
-        from . import bundle
+        from . import autostart, bundle
 
-        # Re-exec the way the app is actually launched (python -m meetre.menubar),
-        # NOT [sys.executable] + sys.argv: under "-m" sys.argv is just the path to
-        # menubar.py, and re-running that as a top-level script dies immediately on
-        # its package-relative imports — which is why restart never came back up.
-        # bundle.launch_args() gives the bundle exe + ["-m", "meetre.menubar"];
-        # fall back to the current interpreter when there's no bundle (dev runs).
+        # Preferred path: when meetre is a login item, let launchd restart the
+        # managed job. This reproduces the exact, known-good login launch and
+        # avoids os.execve() from inside the live AppKit run loop (which crashed:
+        # re-exec'ing while the bundle symlink we launch through is being rebuilt
+        # left the app unable to come back). launchd SIGKILLs us and relaunches.
+        if autostart.is_enabled():
+            uid = os.getuid()
+            try:
+                r = subprocess.run(
+                    ["launchctl", "kickstart", "-k", f"gui/{uid}/{autostart.LABEL}"],
+                    capture_output=True, text=True,
+                )
+                if r.returncode == 0:
+                    return  # launchd is killing + relaunching us now
+            except Exception:  # noqa: BLE001
+                pass  # fall through to the manual relaunch below
+
+        # Fallback (dev run, or not registered as a login item): spawn a fresh
+        # detached instance, then quit this one. Launch via "python -m
+        # meetre.menubar" (bundle exe when available) — never re-run menubar.py as
+        # a script, which dies on its package-relative imports.
         args = bundle.launch_args() or [sys.executable, "-m", "meetre.menubar"]
         try:
             env = dict(os.environ)
             env["PYTHONPATH"] = bundle._pythonpath()
-            os.execve(args[0], args, env)
+            subprocess.Popen(args, env=env, start_new_session=True)
         except Exception as e:  # noqa: BLE001
             rumps.alert("Could not restart", str(e))
+            return
+        rumps.quit_application()
 
     def _do_update(self, interactive=False):
         from . import updater
