@@ -64,3 +64,8 @@ audio or text leaves the machine.
 - Summary/title generation needs `mlx-lm`; gated on `summarizer.available()`.
   "Record with previous" skips the settings dialog and derives the meeting title
   from the summary (`_auto_title` → `_generate_title`) to name the transcript/Note.
+- **Diarization runs on MPS.** pyannote defaults to CPU; `_load_pipeline` moves
+  it to Metal (~12x faster) and caches it per process, retrying on CPU if an op
+  fails on MPS. The menubar `_finish` publishes progressively via `_publish`:
+  transcript (.md + Apple Note) right after ASR, rewritten in place after
+  speakers, then after summary/title (`update_apple_note`).

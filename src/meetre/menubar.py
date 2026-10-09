@@ -489,6 +489,8 @@ class MeetreApp(rumps.App if rumps else object):
         self._update_available = False   # set by the update-check thread
         self._update_shown = False       # what the icon/menu currently show
         self._restart_requested = False  # "install update & restart" pulled
+        self._last_path = None           # latest transcript .md
+        self._last_note = None           # ... and its Apple Note id
 
         # Real image icon for the menu bar (template-tinted), reused on
         # notifications. Falls back to the Unicode glyph if it can't render.
@@ -660,6 +662,7 @@ class MeetreApp(rumps.App if rumps else object):
             None,
             rumps.MenuItem("Settings…", callback=self.on_settings),
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
+            rumps.MenuItem("Open last transcript", callback=self.on_open_last),
             rumps.MenuItem("Open transcripts folder", callback=self.on_open_folder),
             downloads_menu,
             None,
@@ -931,7 +934,7 @@ class MeetreApp(rumps.App if rumps else object):
     def _finish(self):
         from . import recorder as rec
         from . import transcriber
-        from .transcript import _slugify, write_transcript
+        from .transcript import _slugify
 
         title, started, tmp_wav = self._rec_meta
         recorder = self._recorder
@@ -953,11 +956,38 @@ class MeetreApp(rumps.App if rumps else object):
             self._ensure_model(transcriber.mlx_repo(self.cfg.model), f"{_tx_label} {self.cfg.model}")
             use_persons = self.cfg.person_detection
 
+            # Progressive output: the transcript (.md + Apple Note) is written as
+            # soon as transcription finishes, then rewritten in place once the
+            # speakers are identified and again once the summary/title are in.
+            from . import summarizer
+
+            out = {"title": title, "started": started, "duration": duration,
+                   "backend": None, "path": None, "note": None}
+            will_summarize = self.cfg.auto_summarize and summarizer.available()
+
+            def early(segs, persons):
+                if use_persons:
+                    pending = ("⏳ Sprecher werden erkannt … Zusammenfassung folgt."
+                               if will_summarize else "⏳ Sprecher werden erkannt …")
+                else:
+                    pending = "⏳ Zusammenfassung wird erstellt …" if will_summarize else None
+                self._publish(out, segs, persons, pending=pending)
+                self._notify("meetre", f"📝 {out['title']} — transcript ready",
+                             "Speakers and summary follow; the transcript updates itself."
+                             if pending else out["path"].name)
+
             source_aware = "mic" in stems and "system" in stems
             if source_aware:
                 # One transcription of the mix (clean timing); attribute each
                 # segment to you vs. remote from the separated stems.
                 self._stage("Transcribing…")
+
+                def on_transcribed(segs):
+                    out["backend"] = transcriber.available_backend()
+                    early(segs, True)
+                    if use_persons:
+                        self._stage("Detecting speakers…")
+
                 segments, backend = transcriber.transcribe_attributed(
                     final_audio, stems, model=self.cfg.model, language=self.cfg.language,
                     compute_type=self.cfg.compute_type, detect_speakers=use_persons,
@@ -966,6 +996,7 @@ class MeetreApp(rumps.App if rumps else object):
                     progress=self._tx_progress, diar_progress=self._progress,
                     vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
                     merged_analysis=self.cfg.merged_analysis,
+                    on_transcribed=on_transcribed,
                 )
                 use_persons = True
             else:
@@ -975,6 +1006,9 @@ class MeetreApp(rumps.App if rumps else object):
                     compute_type=self.cfg.compute_type, progress=self._tx_progress,
                     vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
                 )
+                if segments:
+                    out["backend"] = backend
+                    early(segments, False)
                 if segments and use_persons:
                     self._stage("Detecting speakers…")
                     try:
@@ -991,6 +1025,13 @@ class MeetreApp(rumps.App if rumps else object):
             if not segments:
                 self._notify("meetre", "Done", "No speech detected.")
                 return
+            out["backend"] = backend
+
+            # Speakers are in: refresh the transcript while the summary runs.
+            if self.cfg.person_detection and use_persons:
+                self._publish(out, segments, use_persons,
+                              pending="⏳ Zusammenfassung wird erstellt …"
+                              if will_summarize else None)
 
             # Generate the summary ONCE; reuse it for the transcript and Notes.
             summary = self._generate_summary(segments)
@@ -1002,29 +1043,15 @@ class MeetreApp(rumps.App if rumps else object):
             if getattr(self, "_auto_title", False):
                 title = self._generate_title(summary, segments, fallback=title)
 
-            path = write_transcript(
-                segments, self.cfg.transcripts_path, title=title, started_at=started,
-                duration=duration, model=self.cfg.model, backend=backend,
-                person_detection=use_persons, summary=summary,
-            )
+            out["title"] = title
+            self._stage("Saving…")
+            self._publish(out, segments, use_persons, summary=summary)
+            path = out["path"]
             mins = int(duration // 60)
             done_msg = ("Summary + transcript ready" if summary
                         else "Transcript ready")
             self._notify("meetre", f"✓ {title} — done",
                          f"{done_msg} · {mins} min · {path.name}")
-
-            # Auto-save the same summary + transcript to Apple Notes.
-            if self.cfg.auto_notes:
-                from . import integrations, summarizer
-
-                self._stage("Saving to Apple Notes…")
-                try:
-                    integrations.add_to_apple_notes(
-                        title, summarizer.transcript_body(path.read_text()),
-                        summary_md=summary or None, when=started)
-                    self._notify("meetre", "Apple Notes", "Saved summary + transcript.")
-                except RuntimeError as e:
-                    self._notify("meetre", "Apple Notes failed", str(e))
 
             for p in [final_audio, *stems.values()]:
                 try:
@@ -1039,6 +1066,65 @@ class MeetreApp(rumps.App if rumps else object):
             self.state = "idle"
             self.rec_item.set_callback(self.on_record)
             self.rec_prev_item.set_callback(self.on_record_previous)
+
+    def _publish(self, out, segments, persons, *, summary="", pending=None):
+        """Write (or rewrite) the transcript .md and its Apple Note.
+
+        ``out`` carries the meeting metadata plus the current ``path``/``note``
+        so later stages update the same file and note in place. A changed
+        title (auto-titling) renames the file.
+        """
+        from . import integrations, summarizer
+        from .transcript import write_transcript
+
+        path = write_transcript(
+            segments, self.cfg.transcripts_path, title=out["title"],
+            started_at=out["started"], duration=out["duration"],
+            model=self.cfg.model, backend=out["backend"] or "?",
+            person_detection=persons, summary=summary,
+        )
+        old = out["path"]
+        if old is not None and old != path:
+            old.unlink(missing_ok=True)
+        out["path"] = self._last_path = path
+
+        if not self.cfg.auto_notes or out["note"] == "failed":
+            return
+        body = summarizer.transcript_body(path.read_text())
+        try:
+            if out["note"] is None:
+                out["note"] = integrations.add_to_apple_notes(
+                    out["title"], body, summary_md=summary or None,
+                    when=out["started"], pending=pending)
+            else:
+                integrations.update_apple_note(
+                    out["note"], out["title"], body, summary_md=summary or None,
+                    when=out["started"], pending=pending)
+            self._last_note = out["note"]
+        except RuntimeError as e:
+            out["note"] = "failed"  # don't retry (and re-notify) every stage
+            self._notify("meetre", "Apple Notes failed", str(e))
+
+    def on_open_last(self, sender=None):
+        """Open the most recent transcript: its Apple Note, else the .md."""
+        import subprocess
+
+        if self._last_note:
+            from . import integrations
+
+            try:
+                integrations.show_apple_note(self._last_note)
+                return
+            except RuntimeError:
+                pass
+        path = self._last_path
+        if path is None or not path.exists():
+            files = sorted(self.cfg.transcripts_path.glob("*.md"), reverse=True)
+            path = files[0] if files else None
+        if path is None:
+            rumps.alert("No transcripts yet.")
+            return
+        subprocess.run(["open", str(path)])
 
     # -- summarize / misc ---------------------------------------------------
 

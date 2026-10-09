@@ -125,31 +125,49 @@ def note_title(meeting_title: str, when=None) -> str:
     return f"MEETRE>{base}-{date}" if date else f"MEETRE>{base}"
 
 
+def _note_body_html(title: str, transcript_md: str, summary_md: Optional[str],
+                    pending: Optional[str]) -> str:
+    parts = [f"# {title}", ""]
+    if pending:
+        parts += [f"_{pending}_", ""]
+    if summary_md and summary_md.strip():
+        # The summary already carries its own section headings — don't wrap it
+        # in another "Zusammenfassung" heading (that caused a double heading).
+        parts += [summary_md.strip(), ""]
+    elif not pending:
+        parts += ["## Zusammenfassung", "_(keine Zusammenfassung)_", ""]
+    parts += ["---", "", "## Volltext-Transkript", "", transcript_md]
+    return _markdown_to_note_html("\n".join(parts))
+
+
+def _osascript(script: str, *args: str) -> str:
+    proc = subprocess.run(["/usr/bin/osascript", "-e", script, *args],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "unknown error")
+    return proc.stdout.strip()
+
+
 def add_to_apple_notes(
     title: str,
     transcript_md: str,
     summary_md: Optional[str] = None,
     folder: Optional[str] = None,
     when=None,
-) -> None:
+    pending: Optional[str] = None,
+) -> str:
     """Create a note containing an optional summary plus the full transcript.
 
     The note title is ``MEETRE>{title}-{date}``. Apple Notes derives the shown
     title from the first line of the body, so that line carries the same text.
     Uses AppleScript (the first run prompts for Automation permission). When
     ``summary_md`` is None, a placeholder "Summary" section is added for you to
-    paste Claude Desktop's reply into.
+    paste Claude Desktop's reply into. ``pending`` is a status line shown in
+    place of the summary while it is still being produced (see
+    :func:`update_apple_note`). Returns the new note's id.
     """
     title = note_title(title, when)
-    parts = [f"# {title}", ""]
-    if summary_md and summary_md.strip():
-        # The summary already carries its own section headings — don't wrap it
-        # in another "Zusammenfassung" heading (that caused a double heading).
-        parts += [summary_md.strip(), ""]
-    else:
-        parts += ["## Zusammenfassung", "_(keine Zusammenfassung)_", ""]
-    parts += ["---", "", "## Volltext-Transkript", "", transcript_md]
-    body_html = _markdown_to_note_html("\n".join(parts))
+    body_html = _note_body_html(title, transcript_md, summary_md, pending)
 
     if folder:
         make = (
@@ -164,15 +182,45 @@ def add_to_apple_notes(
         "  set noteTitle to item 1 of argv\n"
         "  set noteBody to item 2 of argv\n"
         "  tell application \"Notes\"\n"
-        f"    {make}\n"
+        f"    set n to {make}\n"
+        "    return id of n\n"
         "  end tell\n"
         "end run\n"
     )
-    proc = subprocess.run(
-        ["osascript", "-e", script, title, body_html],
-        capture_output=True, text=True,
+    try:
+        return _osascript(script, title, body_html)
+    except RuntimeError as e:
+        raise RuntimeError(f"Could not create the Apple Note: {e}") from e
+
+
+def update_apple_note(
+    note_id: str,
+    title: str,
+    transcript_md: str,
+    summary_md: Optional[str] = None,
+    when=None,
+    pending: Optional[str] = None,
+) -> None:
+    """Replace the body (and title) of a note made by :func:`add_to_apple_notes`."""
+    title = note_title(title, when)
+    body_html = _note_body_html(title, transcript_md, summary_md, pending)
+    script = (
+        "on run argv\n"
+        "  tell application \"Notes\"\n"
+        "    set n to note id (item 1 of argv)\n"
+        "    set body of n to (item 3 of argv)\n"
+        "    set name of n to (item 2 of argv)\n"
+        "  end tell\n"
+        "end run\n"
     )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "Could not create the Apple Note: " + (proc.stderr.strip() or "unknown error")
-        )
+    try:
+        _osascript(script, note_id, title, body_html)
+    except RuntimeError as e:
+        raise RuntimeError(f"Could not update the Apple Note: {e}") from e
+
+
+def show_apple_note(note_id: str) -> None:
+    """Bring Notes to the front with the given note open."""
+    _osascript("on run argv\n  tell application \"Notes\"\n"
+               "    show note id (item 1 of argv)\n    activate\n"
+               "  end tell\nend run\n", note_id)

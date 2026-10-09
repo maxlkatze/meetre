@@ -344,6 +344,7 @@ def transcribe_attributed(
     vad: bool = False,
     word_align: bool = False,
     merged_analysis: bool = False,
+    on_transcribed=None,
 ) -> Tuple[List[Segment], str]:
     """Transcribe the mixed audio once, then attribute speakers from the stems.
 
@@ -364,6 +365,9 @@ def transcribe_attributed(
 
     ``progress`` is ``callable(seconds_done, total_seconds)`` for transcription;
     ``diar_progress`` is ``callable(label, fraction)`` for the pyannote steps.
+    ``on_transcribed(segments)`` is called once segments carry side labels
+    (you / remote), *before* the slow per-person analysis, so callers can show
+    the transcript early; the same segments are then relabelled in place.
     """
     import numpy as np
     import soundfile as sf
@@ -418,7 +422,14 @@ def transcribe_attributed(
         else:
             sys_segs.append(seg)
 
-    # 2) Split each side into individual people, or just label the side.
+    for s in mic_segs:
+        s.speaker = lbl["local"]
+    for s in sys_segs:
+        s.speaker = lbl["remote"]
+    if on_transcribed is not None:
+        on_transcribed(segments)
+
+    # 2) Split each side into individual people (side labels stay otherwise).
     if detect_speakers and merged_analysis:
         # One analysis on the mixed audio; reuse the same turns for both sides.
         try:
@@ -429,11 +440,6 @@ def transcribe_attributed(
         if turns:
             _assign_side(mic_segs, turns, lbl["local"], lbl["local_multi"])
             _assign_side(sys_segs, turns, lbl["remote"], lbl["remote_multi"])
-        else:
-            for s in mic_segs:
-                s.speaker = lbl["local"]
-            for s in sys_segs:
-                s.speaker = lbl["remote"]
     elif detect_speakers:
         # Per-stem analysis (pyannote on each source separately).
         try:
@@ -441,8 +447,7 @@ def transcribe_attributed(
                 if mic is not None else []
             _assign_side(mic_segs, mic_turns, lbl["local"], lbl["local_multi"])
         except RuntimeError:
-            for s in mic_segs:
-                s.speaker = lbl["local"]
+            pass
         try:
             sys_turns = diarize_turns(Path(stems["system"]), hf_token,
                                       num_speakers, min_speakers, max_speakers,
@@ -450,13 +455,7 @@ def transcribe_attributed(
                 if system is not None else []
             _assign_side(sys_segs, sys_turns, lbl["remote"], lbl["remote_multi"])
         except RuntimeError:
-            for s in sys_segs:
-                s.speaker = lbl["remote"]
-    else:
-        for s in mic_segs:
-            s.speaker = lbl["local"]
-        for s in sys_segs:
-            s.speaker = lbl["remote"]
+            pass
 
     return segments, backend
 
@@ -509,6 +508,49 @@ def _pyannote_hook(progress):
     return hook
 
 
+_pipeline_cache: dict = {}
+
+
+def _load_pipeline(Pipeline, hf_token: str):
+    """Load the diarization pipeline once per process, on the GPU when possible.
+
+    pyannote defaults to the CPU; on Apple Silicon moving it to MPS (Metal) is
+    ~12x faster (10 min of audio: ~275 s on CPU vs ~23 s on MPS, M5 Pro).
+    """
+    import torch
+
+    cached = _pipeline_cache.get(hf_token)
+    if cached is not None:
+        return cached
+
+    # torch>=2.6 defaults torch.load to weights_only=True, which rejects
+    # pyannote's checkpoints. They come from a trusted source, so load them
+    # with weights_only=False for the duration of pipeline construction.
+    _orig_load = torch.load
+
+    def _trusting_load(*a, **k):
+        k["weights_only"] = False  # Lightning passes weights_only=True explicitly
+        return _orig_load(*a, **k)
+
+    torch.load = _trusting_load
+    try:
+        # pyannote.audio 4.x takes ``token=``; 3.x takes ``use_auth_token=``.
+        try:
+            pipeline = Pipeline.from_pretrained(_DIARIZATION_MODEL, token=hf_token)
+        except TypeError:
+            pipeline = Pipeline.from_pretrained(_DIARIZATION_MODEL, use_auth_token=hf_token)
+    finally:
+        torch.load = _orig_load
+
+    try:
+        if torch.backends.mps.is_available():
+            pipeline.to(torch.device("mps"))
+    except Exception:  # noqa: BLE001
+        pass
+    _pipeline_cache[hf_token] = pipeline
+    return pipeline
+
+
 def diarize_turns(
     audio_path: Path,
     hf_token: Optional[str],
@@ -544,26 +586,9 @@ def diarize_turns(
             "`meetre config` (hf_token) after accepting the pyannote model terms."
         )
 
-    # torch>=2.6 defaults torch.load to weights_only=True, which rejects
-    # pyannote's checkpoints. They come from a trusted source, so load them
-    # with weights_only=False for the duration of pipeline construction.
     import torch
 
-    _orig_load = torch.load
-
-    def _trusting_load(*a, **k):
-        k["weights_only"] = False  # Lightning passes weights_only=True explicitly
-        return _orig_load(*a, **k)
-
-    torch.load = _trusting_load
-    try:
-        # pyannote.audio 4.x takes ``token=``; 3.x takes ``use_auth_token=``.
-        try:
-            pipeline = Pipeline.from_pretrained(_DIARIZATION_MODEL, token=hf_token)
-        except TypeError:
-            pipeline = Pipeline.from_pretrained(_DIARIZATION_MODEL, use_auth_token=hf_token)
-    finally:
-        torch.load = _orig_load
+    pipeline = _load_pipeline(Pipeline, hf_token)
 
     # Exact count wins; otherwise pass whichever range bounds are set.
     kwargs: dict = {}
@@ -585,7 +610,14 @@ def diarize_turns(
     if data.ndim > 1:
         data = data.mean(axis=1)
     waveform = torch.from_numpy(np.ascontiguousarray(data, dtype="float32")).unsqueeze(0)
-    output = pipeline({"waveform": waveform, "sample_rate": sr}, hook=hook, **kwargs)
+    try:
+        output = pipeline({"waveform": waveform, "sample_rate": sr}, hook=hook, **kwargs)
+    except Exception:  # noqa: BLE001
+        if str(getattr(pipeline, "device", "cpu")) == "cpu":
+            raise
+        # An op the GPU (MPS) backend can't run: retry once on the CPU.
+        pipeline.to(torch.device("cpu"))
+        output = pipeline({"waveform": waveform, "sample_rate": sr}, hook=hook, **kwargs)
     # pyannote.audio 4.x (community-1) returns a result object exposing the
     # Annotation under `.speaker_diarization`; 3.x returned the Annotation
     # directly. Handle both.
