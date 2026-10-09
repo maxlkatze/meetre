@@ -50,6 +50,8 @@ audio or text leaves the machine.
 - `downloads.py` — HF model download with progress. `icon.py` — status-bar icon.
 - `autostart.py` — launchd "start at login". `bundle.py` — `.app` wrapper.
 - `updater.py` — self-update via `git pull`. `crashlog.py` — crash logging.
+- `overlay.py` — live summary HUD (click-through, top-right) fed by
+  `summarize(on_progress=…)`; toggled by `summary_overlay`.
 - `ui.py` — Rich CLI tables/panels. `__init__.py` — silences dep log noise.
 
 ## Notes / gotchas
@@ -69,3 +71,9 @@ audio or text leaves the machine.
   fails on MPS. The menubar `_finish` publishes progressively via `_publish`:
   transcript (.md + Apple Note) right after ASR, rewritten in place after
   speakers, then after summary/title (`update_apple_note`).
+- **K2 Horizon 7B is the preferred summary model** (`_BEST_FIRST[0]`). mlx-lm has
+  no native `k2_horizon` arch; the repo ships `k2_horizon.py` that mlx-lm executes
+  on load, so the spec pins `revision` to a reviewed commit (honored by
+  `downloads.ensure_model` and `load(..., revision=)`). Re-review that file before
+  bumping the pin. K2 always reasons (`<ifm|think…>` tags); use
+  `reasoning_effort="low"` — "medium" overran the think budget for identical text.

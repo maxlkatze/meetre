@@ -1,8 +1,8 @@
 """Local LLM summarization of meeting transcripts via MLX-LM.
 
-Models are chosen per machine from SUMMARY_MODELS (current generation: Qwen3.5
-hybrid-reasoning + Gemma 4); "auto" picks the best that fits the available
-unified memory. Everything runs on Apple's MLX runtime — same stack as
+Models are chosen per machine from SUMMARY_MODELS (K2 Horizon 7B preferred,
+plus Qwen3.5 + Gemma 4); "auto" picks the preferred model that fits the
+available unified memory. Everything runs on Apple's MLX runtime — same stack as
 transcription, no extra server needed.
 """
 
@@ -23,8 +23,11 @@ from typing import Dict, List, Optional, Tuple
 # below — bigger models give better German summaries but need proportionally
 # more unified memory. ``thinks`` makes summarize() turn on the model's internal
 # reasoning pass (the <think> block is generated, then stripped from the output).
-ModelSpec = namedtuple("ModelSpec", "repo size_gb note thinks")
-ModelSpec.__new__.__defaults__ = (False,)  # thinks defaults to False
+# ``revision`` pins a repo to a reviewed commit — required for repos that ship
+# their own model code (mlx-lm executes it on load), so a later upload can't
+# swap in different code. ``template_kwargs`` are extra chat-template options.
+ModelSpec = namedtuple("ModelSpec", "repo size_gb note thinks revision template_kwargs")
+ModelSpec.__new__.__defaults__ = (False, None, None)
 
 # Current generation (June 2026): Qwen3.5 + Gemma 4. Qwen3.5 are hybrid models
 # but we run them in direct (non-reasoning) mode — for summarization the hidden
@@ -43,6 +46,16 @@ SUMMARY_MODELS = {
     "gemma4-26b":    ModelSpec("mlx-community/gemma-4-26b-a4b-it-4bit", 14.5, "MoE — excellent German / 140+ languages"),
     "gemma4-12b":    ModelSpec("mlx-community/gemma-4-12B-4bit", 6.8, "dense — strong multilingual, lighter"),
     "gemma4-e4b":    ModelSpec("mlx-community/gemma-4-e4b-it-4bit", 3.4, "minimal, 140+ languages"),
+    # --- K2 Horizon (IFM, Sept 2026; always reasons before answering) ---
+    # Not yet a native mlx-lm architecture: the repo ships k2_horizon.py, which
+    # mlx-lm runs on load. Pinned to the commit whose code was reviewed.
+    "k2-horizon-7b": ModelSpec("mlx-community/K2-Horizon-7B-4bit", 7.2,
+                               "reasoning — excellent summary writing", True,
+                               "c8698376a102bc5e7ad49089b21b62c096a2506c",
+                               # "low": ~8 s for a 3-min meeting; "medium"
+                               # overran the think budget (~160 s) for the
+                               # same text, so it's not worth it here.
+                               {"reasoning_effort": "low"}),
     # --- Mistral (no newer 2026 release; solid all-rounder) ------------
     "mistral-24b":   ModelSpec("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", 13.3, "solid all-rounder, no reasoning"),
     # --- Legacy aliases: not shown in the menu, kept so an existing
@@ -57,10 +70,13 @@ SUMMARY_MODELS = {
     "qwen3-235b":    ModelSpec("mlx-community/Qwen3-235B-A22B-4bit", 132.3, "legacy — Qwen3 flagship MoE"),
 }
 
-# Best → smallest. Used both for menu order and for picking the best model that
-# fits a given machine when summary_model is "auto". Only current-generation
-# models appear here; legacy aliases above stay resolvable but off the menu.
+# Preferred → fallback. Used both for menu order and for picking the model that
+# "auto" runs on a given machine. K2 Horizon 7B leads: it writes the best
+# summaries we've seen and, at ~7 GB, fits almost every Mac; the rest are ranked
+# best → smallest for machines where it doesn't. Only current-generation models
+# appear here; legacy aliases above stay resolvable but off the menu.
 _BEST_FIRST = [
+    "k2-horizon-7b",
     "qwen3.5-397b", "qwen3.5-122b", "qwen3.5-35b", "qwen3.5-27b",
     "gemma4-26b", "mistral-24b", "gemma4-12b", "qwen3.5-9b",
     "gemma4-e4b", "qwen3.5-4b", "qwen3.5-2b",
@@ -458,6 +474,22 @@ def model_thinks(name: Optional[str]) -> bool:
     return "think" in alias.lower()
 
 
+def _spec(name_or_repo: Optional[str]) -> Optional[ModelSpec]:
+    """The catalog entry for an alias, ``"auto"``, or a repo id (None if unknown)."""
+    if not name_or_repo or name_or_repo == "auto":
+        name_or_repo = default_model()
+    spec = SUMMARY_MODELS.get(name_or_repo)
+    if spec is not None:
+        return spec
+    return next((s for s in SUMMARY_MODELS.values() if s.repo == name_or_repo), None)
+
+
+def model_revision(name_or_repo: Optional[str]) -> Optional[str]:
+    """Pinned commit for a model (None = latest)."""
+    spec = _spec(name_or_repo)
+    return spec.revision if spec is not None else None
+
+
 def resolve_model(name: Optional[str]) -> str:
     """Accept a friendly alias, ``"auto"``, or a full HF repo id.
 
@@ -478,12 +510,18 @@ def _strip_thinking(text: str) -> str:
     template pre-fills the OPENING <think> as part of the prompt, so the
     generated text usually contains only the reasoning followed by a trailing
     </think> and then the answer — with no opening tag. Drop everything up to
-    and including the last </think>, then also clear any fully-tagged block.
+    and including the last closing tag, then also clear any fully-tagged block.
+    K2 Horizon uses ``<ifm|think>`` / ``<ifm|think_fast>`` / ``<ifm|think_faster>``.
     """
-    if "</think>" in text:
-        text = text.rsplit("</think>", 1)[-1]
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    return text.strip()
+    closes = list(_THINK_CLOSE.finditer(text))
+    if closes:
+        text = text[closes[-1].end():]
+    text = re.sub(r"<(?:ifm\|)?think(?:_fast|_faster)?>.*?</(?:ifm\|)?think(?:_fast|_faster)?>",
+                  "", text, flags=re.DOTALL)
+    return text.replace("<|ifm|im_end|>", "").strip()
+
+
+_THINK_CLOSE = re.compile(r"</(?:ifm\|)?think(?:_fast|_faster)?>")
 
 
 def _chunks(text: str, size: int = _CHUNK_CHARS) -> List[str]:
@@ -553,22 +591,35 @@ def summarize(
     model: Optional[str] = None,
     language: Optional[str] = None,
     prompt: Optional[str] = None,
+    on_progress=None,
 ) -> str:
     """Summarize transcript ``text`` with a local MLX model. Returns markdown.
 
     ``prompt`` overrides the default instruction (the transcript is appended
     automatically); when None, :func:`default_prompt` is used.
+
+    ``on_progress(phase, text, stage)`` streams the output as it is generated:
+    ``phase`` is "thinking" (``text`` = the reasoning so far) or "writing"
+    (``text`` = the answer so far); ``stage`` is "" for a single pass, or
+    "part 2/5" / "merge" while long meetings are summarized in chunks.
+    Called from the generating thread.
     """
     if not available():
         raise RuntimeError("Summarization needs mlx-lm: pip install mlx-lm")
     if not text.strip():
         return ""
 
-    from mlx_lm import generate, load
+    from mlx_lm import load, stream_generate
 
     repo = resolve_model(model)
     thinks = model_thinks(model)
-    lm, tokenizer = load(repo)
+    spec = _spec(model)
+    tmpl = dict((spec.template_kwargs if spec else None) or {})
+    stage = {"label": ""}
+    # Models with a reasoning_effort knob can't switch thinking off; their
+    # fallback is a shorter reasoning pass instead of a direct answer.
+    always_thinks = "reasoning_effort" in tmpl
+    lm, tokenizer = load(repo, revision=model_revision(model))
     lang = language or ""
     system = _SYSTEM.get(lang, _SYSTEM["en"])
     instruction = (prompt or default_prompt(language)).strip()
@@ -580,16 +631,25 @@ def summarize(
     reduce_budget = 500
     think_budget = 4000  # extra tokens reserved for the reasoning pass
 
-    def _generate(user: str, max_tokens: int, use_thinking: bool) -> str:
+    def _generate(user: str, max_tokens: int, use_thinking: bool, **extra) -> str:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
         try:
             chat = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, enable_thinking=use_thinking
+                messages, add_generation_prompt=True, enable_thinking=use_thinking,
+                **{**tmpl, **extra},
             )
         except TypeError:
             chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-        return generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens, verbose=False)
+        raw = ""
+        for resp in stream_generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens):
+            raw += resp.text
+            if on_progress is not None and resp.text:
+                if use_thinking and not _THINK_CLOSE.search(raw):
+                    on_progress("thinking", raw, stage["label"])
+                else:
+                    on_progress("writing", _strip_thinking(raw), stage["label"])
+        return raw
 
     def _run(user: str, max_tokens: int) -> str:
         if thinks:
@@ -597,9 +657,15 @@ def summarize(
             # A reasoning model's answer follows the closing </think>. If the
             # tag is missing the model ran out of budget mid-thought (no answer
             # was produced) — never dump the raw reasoning; fall back instead.
-            answer = raw.rsplit("</think>", 1)[-1].strip() if "</think>" in raw else ""
+            answer = _strip_thinking(raw) if _THINK_CLOSE.search(raw) else ""
             if answer:
-                return _strip_thinking(answer)
+                return answer
+            if always_thinks:
+                # Can't turn reasoning off: retry with the shortest pass, and
+                # give up (empty) rather than return half a thought.
+                raw = _generate(user, max_tokens + think_budget, True,
+                                reasoning_effort="low")
+                return _strip_thinking(raw) if _THINK_CLOSE.search(raw) else ""
             # Reasoning truncated or produced nothing usable: redo the call with
             # the thinking pass off so the model answers directly.
             raw = _generate(user, max_tokens, False)
@@ -612,7 +678,11 @@ def summarize(
         return _run(f"{instruction}\n\n{label}:\n{parts[0]}", answer_budget)
 
     # Map-reduce for long meetings: summarize each chunk, then combine.
-    partials = [_run(f"{instruction}\n\n{label}:\n{p}", reduce_budget) for p in parts]
+    partials = []
+    for i, p in enumerate(parts, 1):
+        stage["label"] = f"part {i}/{len(parts)}"
+        partials.append(_run(f"{instruction}\n\n{label}:\n{p}", reduce_budget))
+    stage["label"] = "merge"
     reduce_instr = _REDUCE.get(lang, _REDUCE["en"])
     return _run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget)
 
@@ -636,7 +706,11 @@ def generate_title(
 
     repo = resolve_model(model)
     thinks = model_thinks(model)
-    lm, tokenizer = load(repo)
+    spec = _spec(model)
+    tmpl = dict((spec.template_kwargs if spec else None) or {})
+    if "reasoning_effort" in tmpl:
+        tmpl["reasoning_effort"] = "low"  # a title doesn't need deep reasoning
+    lm, tokenizer = load(repo, revision=model_revision(model))
     lang = language or ""
     system = _SYSTEM.get(lang, _SYSTEM["en"])
     instruction = _TITLE_INSTRUCTION.get(lang, _TITLE_INSTRUCTION["en"])
@@ -649,7 +723,7 @@ def generate_title(
                 {"role": "user", "content": f"{instruction}\n\n{label}:\n{snippet}"}]
     try:
         chat = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, enable_thinking=thinks)
+            messages, add_generation_prompt=True, enable_thinking=thinks, **tmpl)
     except TypeError:
         chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
     max_tokens = 40 + (4000 if thinks else 0)

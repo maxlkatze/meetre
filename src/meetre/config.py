@@ -81,6 +81,9 @@ class Config:
     # Menu-bar app: when a Microsoft Teams call starts, pop up from the status
     # item and ask whether to record it.
     detect_calls: bool = True
+    # Menu-bar app: stream the summary into a translucent, click-through
+    # overlay in the top-right corner while it is being written.
+    summary_overlay: bool = True
 
     @property
     def transcripts_path(self) -> Path:

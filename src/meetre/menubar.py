@@ -508,6 +508,12 @@ class MeetreApp(rumps.App if rumps else object):
         # A single main-thread timer reflects state into the menu bar.
         self._timer = rumps.Timer(self._tick, 0.5)
         self._timer.start()
+        # Live summary HUD; its own faster timer animates/streams the text.
+        from .overlay import SummaryOverlay
+
+        self._overlay = SummaryOverlay()
+        self._overlay_timer = rumps.Timer(self._overlay.tick, 1 / 15)
+        self._overlay_timer.start()
         # By default the NSTimer only fires in the default run-loop mode, so the
         # moment the user opens the menu the loop switches to event-tracking mode
         # and the title/spinner freeze and queued notifications stall until the
@@ -516,9 +522,10 @@ class MeetreApp(rumps.App if rumps else object):
         try:
             from Foundation import NSRunLoop, NSRunLoopCommonModes
 
-            nstimer = getattr(self._timer, "_nstimer", None)
-            if nstimer is not None:
-                NSRunLoop.currentRunLoop().addTimer_forMode_(nstimer, NSRunLoopCommonModes)
+            for t in (self._timer, self._overlay_timer):
+                nstimer = getattr(t, "_nstimer", None)
+                if nstimer is not None:
+                    NSRunLoop.currentRunLoop().addTimer_forMode_(nstimer, NSRunLoopCommonModes)
         except Exception:  # noqa: BLE001
             pass
         # Check for updates (git pull) in the background on every launch, then
@@ -617,6 +624,9 @@ class MeetreApp(rumps.App if rumps else object):
         self.calls_item = rumps.MenuItem("Ask to record Teams calls",
                                          callback=self.on_toggle_calls)
         self.calls_item.state = 1 if self.cfg.detect_calls else 0
+        self.overlay_item = rumps.MenuItem("Live summary overlay",
+                                           callback=self.on_toggle_overlay)
+        self.overlay_item.state = 1 if self.cfg.summary_overlay else 0
 
         # "About meetre" groups the app-level actions (version, updates,
         # restart, start-at-login, quit) into one submenu so the top level stays
@@ -659,6 +669,7 @@ class MeetreApp(rumps.App if rumps else object):
             self.sysaudio_item,
             self.persons_item,
             self.calls_item,
+            self.overlay_item,
             None,
             rumps.MenuItem("Settings…", callback=self.on_settings),
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
@@ -732,6 +743,11 @@ class MeetreApp(rumps.App if rumps else object):
         self.cfg.person_detection = not self.cfg.person_detection
         self.cfg.save()
         sender.state = 1 if self.cfg.person_detection else 0
+
+    def on_toggle_overlay(self, sender):
+        self.cfg.summary_overlay = not self.cfg.summary_overlay
+        self.cfg.save()
+        sender.state = 1 if self.cfg.summary_overlay else 0
 
     def on_toggle_calls(self, sender):
         self.cfg.detect_calls = not self.cfg.detect_calls
@@ -1163,12 +1179,31 @@ class MeetreApp(rumps.App if rumps else object):
             self._ensure_model(summarizer.resolve_model(self.cfg.summary_model),
                                f"Summary {self.cfg.summary_model}")
             self._stage("Summarizing…")
-            return summarizer.summarize(
-                text, model=self.cfg.summary_model, language=self.cfg.language,
-                prompt=self.cfg.summary_prompt or None)
+            return self._summarize_live(text)
         except Exception as e:  # noqa: BLE001
             self._notify("meetre", "Summary failed", _summary_error_hint(e))
             return ""
+
+    def _summarize_live(self, text) -> str:
+        """summarizer.summarize, streamed into the live overlay when enabled."""
+        from . import summarizer
+
+        live = self.cfg.summary_overlay
+        summary = ""
+        if live:
+            alias = self.cfg.summary_model
+            if not alias or alias == "auto":
+                alias = summarizer.default_model()
+            self._overlay.begin(alias)
+        try:
+            summary = summarizer.summarize(
+                text, model=self.cfg.summary_model, language=self.cfg.language,
+                prompt=self.cfg.summary_prompt or None,
+                on_progress=self._overlay.feed if live else None)
+            return summary
+        finally:
+            if live:
+                self._overlay.finish(summary)
 
     def _generate_title(self, summary, segments, fallback: str) -> str:
         """Derive a short meeting title from the summary (or transcript).
@@ -1214,9 +1249,7 @@ class MeetreApp(rumps.App if rumps else object):
                 self._ensure_model(summarizer.resolve_model(self.cfg.summary_model),
                                    f"Summary {self.cfg.summary_model}")
                 self._stage("Summarizing…")
-                summary = summarizer.summarize(
-                    body, model=self.cfg.summary_model, language=self.cfg.language,
-                    prompt=self.cfg.summary_prompt or None)
+                summary = self._summarize_live(body)
             except Exception as e:  # noqa: BLE001
                 self._notify("meetre", "Summary failed", str(e))
 

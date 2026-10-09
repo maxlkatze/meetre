@@ -22,8 +22,21 @@ def _model_dir(repo: str) -> Path:
     return Path(HF_HUB_CACHE) / ("models--" + repo.replace("/", "--"))
 
 
+def _pinned_revision(repo: str) -> Optional[str]:
+    """Commit a catalog model is pinned to (see summarizer.ModelSpec.revision)."""
+    try:
+        from .summarizer import model_revision
+
+        return model_revision(repo)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def is_cached(repo: str) -> bool:
     snaps = _model_dir(repo) / "snapshots"
+    rev = _pinned_revision(repo)
+    if rev:
+        return (snaps / rev).is_dir()
     return snaps.exists() and any(snaps.iterdir())
 
 
@@ -67,7 +80,7 @@ def ensure_model(repo: str, on_progress: Optional[ProgressCB] = None) -> None:
 
     def _dl():
         try:
-            snapshot_download(repo)
+            snapshot_download(repo, revision=_pinned_revision(repo))
         except Exception as e:  # noqa: BLE001
             state["err"] = e
         finally:
