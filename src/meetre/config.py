@@ -78,6 +78,9 @@ class Config:
     summary_prompt: str = ""
     # Check for updates (git pull) automatically when the menu-bar app launches.
     auto_update: bool = True
+    # Menu-bar app: when a Microsoft Teams call starts, pop up from the status
+    # item and ask whether to record it.
+    detect_calls: bool = True
 
     @property
     def transcripts_path(self) -> Path:

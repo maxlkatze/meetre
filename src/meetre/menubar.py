@@ -369,6 +369,98 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
 
 
 # ---------------------------------------------------------------------------
+# "Record this call?" popover (anchored to the status item)
+# ---------------------------------------------------------------------------
+
+_PROMPT_CLASS = None
+
+
+def _prompt_controller_class():
+    """Action target for the call-prompt popover buttons (defined once)."""
+    global _PROMPT_CLASS
+    if _PROMPT_CLASS is not None:
+        return _PROMPT_CLASS
+    import objc
+
+    class _CallPromptController(objc.lookUpClass("NSObject")):
+        def recordClicked_(self, sender):
+            self.on_choice("record")
+
+        def settingsClicked_(self, sender):
+            self.on_choice("settings")
+
+        def dismissClicked_(self, sender):
+            self.on_choice("dismiss")
+
+    _PROMPT_CLASS = _CallPromptController
+    return _PROMPT_CLASS
+
+
+def _show_call_prompt(status_item, app_name: str, on_choice):
+    """Pop a small panel down from the menu-bar icon asking to record a call.
+
+    ``on_choice(choice)`` gets "record" (previous settings), "settings" (open
+    the recording dialog) or "dismiss". Returns the controller, which the
+    caller must retain; ``ctrl.close()`` dismisses the popover.
+    """
+    from AppKit import (
+        NSApp, NSButton, NSFont, NSMakeRect, NSPopover, NSTextField, NSView,
+        NSViewController,
+    )
+
+    W, H, PAD = 320, 112, 16
+    view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+
+    def text(s, y, *, bold=False):
+        lbl = NSTextField.labelWithString_(s)
+        lbl.setFont_(NSFont.boldSystemFontOfSize_(13) if bold else NSFont.systemFontOfSize_(12))
+        lbl.setFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 18))
+        view.addSubview_(lbl)
+
+    text(f"{app_name} call started", H - PAD - 18, bold=True)
+    text("Record and transcribe this meeting?", H - PAD - 40)
+
+    ctrl = _prompt_controller_class().alloc().init()
+    popover = NSPopover.alloc().init()
+
+    def button(title, x, w, action, key=""):
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(x, PAD - 4, w, 32))
+        b.setTitle_(title)
+        b.setBezelStyle_(1)
+        b.setKeyEquivalent_(key)
+        b.setTarget_(ctrl)
+        b.setAction_(action)
+        view.addSubview_(b)
+
+    button("Not now", PAD - 6, 90, "dismissClicked:", "\x1b")
+    button("Record…", W - PAD - 196, 98, "settingsClicked:")
+    button("Record", W - PAD - 94, 100, "recordClicked:", "\r")
+
+    vc = NSViewController.alloc().init()
+    vc.setView_(view)
+    popover.setContentViewController_(vc)
+    popover.setContentSize_(view.frame().size)
+    popover.setBehavior_(0)  # application-defined: stays until answered
+
+    def close():
+        if popover.isShown():
+            popover.performClose_(None)
+
+    def choose(choice):
+        close()
+        on_choice(choice)
+
+    ctrl.popover = popover  # keep the popover alive with the controller
+    ctrl.close = close
+    ctrl.on_choice = choose
+
+    btn = status_item.button()
+    NSApp.activateIgnoringOtherApps_(True)
+    popover.showRelativeToRect_ofView_preferredEdge_(btn.bounds(), btn, 1)  # below
+    return ctrl
+
+
+# ---------------------------------------------------------------------------
 # Status-bar app
 # ---------------------------------------------------------------------------
 
@@ -391,6 +483,12 @@ class MeetreApp(rumps.App if rumps else object):
         self._download = None        # (icon, label, fraction) while a bar is active
         self._spin = 0               # spinner frame counter
         self._notify_queue = []      # (title, subtitle, msg) from worker threads
+        self._call_started = False   # set by the call watcher thread
+        self._call_prompt = None     # open "record this call?" popover
+        self._call_prompt_at = 0.0   # when it was shown (auto-dismiss)
+        self._update_available = False   # set by the update-check thread
+        self._update_shown = False       # what the icon/menu currently show
+        self._restart_requested = False  # "install update & restart" pulled
 
         # Real image icon for the menu bar (template-tinted), reused on
         # notifications. Falls back to the Unicode glyph if it can't render.
@@ -421,8 +519,20 @@ class MeetreApp(rumps.App if rumps else object):
                 NSRunLoop.currentRunLoop().addTimer_forMode_(nstimer, NSRunLoopCommonModes)
         except Exception:  # noqa: BLE001
             pass
-        # Check for updates (git pull) in the background on every launch.
-        threading.Thread(target=self._do_update, daemon=True).start()
+        # Check for updates (git pull) in the background on every launch, then
+        # keep checking GitHub periodically; an available update turns the icon
+        # blue. The running commit is captured before any pull, so an update
+        # that was pulled but not yet restarted into still shows as available.
+        from . import updater
+
+        self._running_rev = updater.head()
+        threading.Thread(target=self._update_loop, daemon=True).start()
+        # Watch for Teams calls and offer to record them.
+        from .callwatch import CallWatcher
+
+        self._call_watcher = CallWatcher(self._on_call_started)
+        if self.cfg.detect_calls:
+            self._call_watcher.start()
 
     # -- menu construction --------------------------------------------------
 
@@ -502,6 +612,9 @@ class MeetreApp(rumps.App if rumps else object):
         self.sysaudio_item.state = 1 if self.cfg.capture_system else 0
         self.persons_item = rumps.MenuItem("Person detection", callback=self.on_toggle_persons)
         self.persons_item.state = 1 if self.cfg.person_detection else 0
+        self.calls_item = rumps.MenuItem("Ask to record Teams calls",
+                                         callback=self.on_toggle_calls)
+        self.calls_item.state = 1 if self.cfg.detect_calls else 0
 
         # "About meetre" groups the app-level actions (version, updates,
         # restart, start-at-login, quit) into one submenu so the top level stays
@@ -525,8 +638,13 @@ class MeetreApp(rumps.App if rumps else object):
         about_menu.add(rumps.MenuItem("Uninstall meetre…", callback=self.on_uninstall))
         about_menu.add(rumps.MenuItem("Quit meetre", callback=rumps.quit_application))
 
+        update_items = []
+        if self._update_shown:
+            update_items = [rumps.MenuItem("⬆ Update available — install & restart",
+                                           callback=self.on_install_update)]
         self.menu = [
             self.status_item,
+            *update_items,
             None,
             self.rec_item,
             self.rec_prev_item,
@@ -538,6 +656,7 @@ class MeetreApp(rumps.App if rumps else object):
             spk_menu,
             self.sysaudio_item,
             self.persons_item,
+            self.calls_item,
             None,
             rumps.MenuItem("Settings…", callback=self.on_settings),
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
@@ -610,6 +729,51 @@ class MeetreApp(rumps.App if rumps else object):
         self.cfg.person_detection = not self.cfg.person_detection
         self.cfg.save()
         sender.state = 1 if self.cfg.person_detection else 0
+
+    def on_toggle_calls(self, sender):
+        self.cfg.detect_calls = not self.cfg.detect_calls
+        self.cfg.save()
+        sender.state = 1 if self.cfg.detect_calls else 0
+        if self.cfg.detect_calls:
+            self._call_watcher.start()
+        else:
+            self._call_watcher.stop()
+            self._close_call_prompt()
+
+    # -- call detection -----------------------------------------------------
+
+    def _on_call_started(self):
+        # Watcher thread: just flag it; _tick shows the popover on the main thread.
+        self._call_started = True
+
+    def _show_call_prompt(self):
+        if self.state != "idle" or self._call_prompt is not None:
+            return
+        try:
+            ctrl = _show_call_prompt(
+                self._nsapp.nsstatusitem, "Microsoft Teams", self._on_call_choice)
+            if not ctrl.popover.isShown():
+                # Too early (app still launching): retry on the next tick.
+                self._call_started = self._call_watcher.in_call
+                return
+            self._call_prompt = ctrl
+            self._call_prompt_at = time.monotonic()
+        except Exception:  # noqa: BLE001
+            # No status item / popover support: fall back to a notification.
+            self._post("meetre", "Microsoft Teams call started",
+                       "Click the meetre icon → Record to capture it.")
+
+    def _close_call_prompt(self):
+        if self._call_prompt is not None:
+            self._call_prompt.close()
+            self._call_prompt = None
+
+    def _on_call_choice(self, choice):
+        self._call_prompt = None
+        if choice == "record":
+            self.on_record_previous()
+        elif choice == "settings":
+            self.on_record()
 
     # -- settings window ----------------------------------------------------
 
@@ -989,6 +1153,27 @@ class MeetreApp(rumps.App if rumps else object):
     def on_update(self, sender=None):
         threading.Thread(target=self._do_update, args=(True,), daemon=True).start()
 
+    def on_install_update(self, sender=None):
+        # Pull off the main thread; _tick then runs on_restart (it may alert).
+        def work():
+            self._do_update()
+            self._restart_requested = True
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_loop(self, interval=1800):
+        self._do_update()
+        while True:
+            time.sleep(interval)
+            self._check_update()
+
+    def _check_update(self):
+        from . import updater
+
+        result = updater.check(self._running_rev)
+        if result.get("error") is None:
+            self._update_available = result["available"]
+
     def on_restart(self, sender=None):
         """Relaunch the app in place (e.g. to apply a downloaded update)."""
         if self.state != "idle":
@@ -1040,6 +1225,7 @@ class MeetreApp(rumps.App if rumps else object):
         from . import updater
 
         result = updater.update()
+        self._check_update()
         if result.get("updated"):
             self._notify("meetre", "Update installed",
                          "Restart meetre to apply the new version.")
@@ -1136,11 +1322,44 @@ class MeetreApp(rumps.App if rumps else object):
         except Exception:  # noqa: BLE001
             pass
 
+    def _show_update_state(self, available):
+        """Blue icon + menu entry while an update is available (main thread)."""
+        from . import icon as _icon
+
+        self._update_shown = available
+        blue = _icon.update_icon_path() if available else None
+        if self._icon_path:
+            try:
+                if blue:
+                    self.template = False  # keep the blue tint (no template)
+                    self.icon = blue
+                else:
+                    self.template = True
+                    self.icon = self._icon_path
+            except Exception:  # noqa: BLE001
+                pass
+        self._build_menu()
+
     def _tick(self, _timer):
         # Deliver any queued notifications on the main thread.
         while self._notify_queue:
             title, subtitle, msg = self._notify_queue.pop(0)
             self._post(title, subtitle, msg)
+        if self._restart_requested:
+            self._restart_requested = False
+            self.on_restart()
+            return
+        if self._update_available != self._update_shown:
+            self._show_update_state(self._update_available)
+        if self._call_started:
+            self._call_started = False
+            self._show_call_prompt()
+        # Unanswered prompt: drop it once recording started some other way, the
+        # call is over, or after 2 minutes.
+        if self._call_prompt is not None and (
+                self.state != "idle" or not self._call_watcher.in_call
+                or time.monotonic() - self._call_prompt_at > 120):
+            self._close_call_prompt()
         self._spin = (self._spin + 1) % len(SPINNER)
         if self.state == "recording" and self._recorder is not None:
             m, s = divmod(int(self._recorder.seconds), 60)

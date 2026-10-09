@@ -72,3 +72,51 @@ def icon_path() -> Optional[str]:
         _cached = str(_ICON_PATH)
         return _cached
     return None
+
+
+_UPDATE_ICON_PATH = CONFIG_DIR / "icon_update.png"
+_update_cached: Optional[str] = None
+
+
+def _render_tinted(src: str, path: Path) -> bool:
+    """Write a system-blue copy of the icon at ``src`` to ``path``."""
+    try:
+        from AppKit import (
+            NSBitmapImageRep, NSColor, NSCompositingOperationSourceAtop, NSImage,
+            NSMakeRect, NSRectFillUsingOperation,
+        )
+
+        base = NSImage.alloc().initWithContentsOfFile_(src)
+        if base is None:
+            return False
+        size = base.size()
+        rect = NSMakeRect(0, 0, size.width, size.height)
+        img = NSImage.alloc().initWithSize_(size)
+        img.lockFocus()
+        base.drawInRect_(rect)
+        NSColor.systemBlueColor().set()
+        NSRectFillUsingOperation(rect, NSCompositingOperationSourceAtop)
+        rep = NSBitmapImageRep.alloc().initWithFocusedViewRect_(rect)
+        img.unlockFocus()
+        if rep is None:
+            return False
+        data = rep.representationUsingType_properties_(4, None)  # PNG
+        if data is None:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return bool(data.writeToFile_atomically_(str(path), True))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def update_icon_path() -> Optional[str]:
+    """Blue variant of the icon, shown while an update is available."""
+    global _update_cached
+    if _update_cached is not None:
+        return _update_cached
+    src = icon_path()
+    if src is None:
+        return None
+    if _UPDATE_ICON_PATH.exists() or _render_tinted(src, _UPDATE_ICON_PATH):
+        _update_cached = str(_UPDATE_ICON_PATH)
+    return _update_cached

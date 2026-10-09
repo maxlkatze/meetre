@@ -7,6 +7,7 @@ on launch) and the install script.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,40 @@ def _git() -> Optional[str]:
 
 def _run(git: str, root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run([git, "-C", str(root), *args], capture_output=True, text=True)
+
+
+def head() -> Optional[str]:
+    """Commit currently checked out (None if unknown)."""
+    git, root = _git(), repo_root()
+    if not git or not root:
+        return None
+    return _run(git, root, "rev-parse", "HEAD").stdout.strip() or None
+
+
+def check(since: Optional[str] = None) -> dict:
+    """Fetch and report whether the upstream branch has commits not in ``since``.
+
+    ``since`` is the commit the running app was started from (default: HEAD),
+    so an update that was already pulled but not yet restarted into still
+    counts as available. Returns ``{available, behind, error}``.
+    """
+    git, root = _git(), repo_root()
+    if not git or not root or not has_remote():
+        return {"available": False, "behind": 0, "error": "no git checkout/remote"}
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # never block on credentials
+    try:
+        fetch = subprocess.run([git, "-C", str(root), "fetch", "--quiet"],
+                               capture_output=True, text=True, env=env, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"available": False, "behind": 0, "error": "git fetch timed out"}
+    if fetch.returncode != 0:
+        return {"available": False, "behind": 0,
+                "error": fetch.stderr.strip() or "git fetch failed"}
+    count = _run(git, root, "rev-list", "--count", f"{since or 'HEAD'}..@{{u}}")
+    if count.returncode != 0:
+        return {"available": False, "behind": 0, "error": count.stderr.strip()}
+    behind = int(count.stdout.strip() or 0)
+    return {"available": behind > 0, "behind": behind, "error": None}
 
 
 def has_remote() -> bool:

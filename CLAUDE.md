@@ -44,6 +44,8 @@ audio or text leaves the machine.
 - `transcript.py` — render speaker-labelled Markdown transcript (`write_transcript`).
 - `integrations.py` — Apple Notes (`add_to_apple_notes`) + Claude Desktop hand-off.
 - `align.py` — Silero VAD + phoneme forced alignment for Whisper segments.
+- `callwatch.py` — detects a Teams call (Teams process capturing the mic, via
+  CoreAudio process list) → menubar popover asking to record (`detect_calls`).
 - `sysaudio.py` — compiles bundled Swift ScreenCaptureKit helper for system audio.
 - `downloads.py` — HF model download with progress. `icon.py` — status-bar icon.
 - `autostart.py` — launchd "start at login". `bundle.py` — `.app` wrapper.
