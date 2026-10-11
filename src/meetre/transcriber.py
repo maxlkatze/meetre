@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .mlxthread import on_mlx_thread
+
 # pyannote.audio 4.x ships OpenTelemetry usage metrics that phone home. meetre is
 # local-only, so disable them before pyannote is imported (setdefault keeps it
 # overridable for anyone who explicitly opts in).
@@ -209,6 +211,7 @@ def _load_audio_16k(audio_path):
     return np.ascontiguousarray(data, dtype="float32")
 
 
+@on_mlx_thread
 def _transcribe_mlx(audio_path, model, language, progress) -> List[Segment]:
     import mlx_whisper
 
@@ -272,6 +275,7 @@ def load_parakeet(repo: str):
     return _parakeet_cache[repo]
 
 
+@on_mlx_thread
 def _transcribe_parakeet(audio_path, model, progress=None) -> List[Segment]:
     repo = PARAKEET_MODELS.get(model, model)
     pk = load_parakeet(repo)

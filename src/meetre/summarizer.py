@@ -17,6 +17,8 @@ from collections import namedtuple
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .mlxthread import on_mlx_thread
+
 # A summary model: HF repo, approximate 4-bit weight size in GB (measured from
 # the mlx-community repos), a one-line note, and whether it is a reasoning
 # ("thinking") model. The size drives the per-machine "does this fit?" check
@@ -606,6 +608,7 @@ def summarize_markdown(md: str, model: Optional[str] = None, language: Optional[
     return summarize(transcript_body(md), model=model, language=language)
 
 
+@on_mlx_thread
 def summarize(
     text: str,
     model: Optional[str] = None,
@@ -707,6 +710,7 @@ def summarize(
     return _run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget)
 
 
+@on_mlx_thread
 def generate_title(
     text: str,
     model: Optional[str] = None,
@@ -783,6 +787,7 @@ def _load_for_chat(model: Optional[str]):
     return _chat_model["lm"], _chat_model["tok"]
 
 
+@on_mlx_thread
 def release_chat_model() -> None:
     """Free the resident chat model (and the Metal buffers it holds)."""
     _chat_model.update(key=None, lm=None, tok=None)
@@ -823,6 +828,7 @@ def _fit_transcript(text: str, limit: int = _CHAT_TRANSCRIPT_CHARS) -> str:
     return f"{text[:half]}\n\n[… middle of the meeting omitted for length …]\n\n{text[-half:]}"
 
 
+@on_mlx_thread
 def chat(
     history: List[Dict[str, str]],
     model: Optional[str] = None,
@@ -952,6 +958,7 @@ def _parse_json_object(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+@on_mlx_thread
 def infer_speaker_names(
     text: str,
     labels: List[str],
