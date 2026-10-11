@@ -15,6 +15,10 @@ from typing import Optional
 
 CONFIG_DIR = Path(os.path.expanduser("~/.config/meetre"))
 CONFIG_PATH = CONFIG_DIR / "config.json"
+# Transcripts + MP3 backups. A fixed home location: the old default was relative
+# to the working directory, which is "/" when launched by launchd or the .app,
+# so every transcript write failed silently.
+DEFAULT_DATA_DIR = Path.home() / "Documents" / "meetre"
 
 # Transcription models. Whisper sizes (smallest/fastest first; large-v3-turbo is
 # the best Whisper quality/speed balance on Apple Silicon), plus NVIDIA Parakeet
@@ -43,9 +47,9 @@ class Config:
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
     # Where transcripts are written.
-    transcripts_dir: str = field(default_factory=lambda: str(Path.cwd() / "transcripts"))
+    transcripts_dir: str = field(default_factory=lambda: str(DEFAULT_DATA_DIR / "transcripts"))
     # Where the compressed MP3 backup of each recording is kept.
-    audio_backup_dir: str = field(default_factory=lambda: str(Path.cwd() / "audio_backup"))
+    audio_backup_dir: str = field(default_factory=lambda: str(DEFAULT_DATA_DIR / "audio_backup"))
     # Microphone (your voice). None = system default input.
     mic_device: Optional[int] = None
     # Loopback device capturing system audio (other participants). None = auto.
@@ -84,6 +88,12 @@ class Config:
     # Menu-bar app: stream the summary into a translucent, click-through
     # overlay in the top-right corner while it is being written.
     summary_overlay: bool = True
+    # After speaker detection, let the local LLM read the transcript for
+    # explicit name evidence ("Thanks, Anna …") and replace "Speaker 2" with
+    # the real name. Names are verified against the transcript before use.
+    name_speakers: bool = True
+    # Your own name: replaces "Me"/"Ich" (the microphone side) in transcripts.
+    my_name: str = ""
 
     @property
     def transcripts_path(self) -> Path:
@@ -106,4 +116,27 @@ class Config:
         data = json.loads(CONFIG_PATH.read_text())
         # Only keep keys we know about so stale configs don't crash.
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in data.items() if k in known})
+        cfg = cls(**{k: v for k, v in data.items() if k in known})
+        if cfg._repair_dirs():
+            cfg.save()
+        return cfg
+
+    def _repair_dirs(self) -> bool:
+        """Point unwritable output dirs (e.g. "/transcripts") at ~/Documents/meetre."""
+        changed = False
+        for key, sub in (("transcripts_dir", "transcripts"), ("audio_backup_dir", "audio_backup")):
+            if not _writable_dir(Path(getattr(self, key) or "").expanduser()):
+                setattr(self, key, str(DEFAULT_DATA_DIR / sub))
+                changed = True
+        return changed
+
+
+def _writable_dir(path: Path) -> bool:
+    """True if ``path`` exists (or can be created) and accepts new files."""
+    if not str(path) or not path.is_absolute():
+        return False
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return os.access(path, os.W_OK)
+    except OSError:
+        return False

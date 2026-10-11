@@ -49,6 +49,16 @@ def _ts() -> str:
     return _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+def note(kind: str, msg: str) -> None:
+    """Log a non-exception problem (e.g. a recording that produced nothing)."""
+    try:
+        path = crashlog_dir() / f"crash-{_ts()}.log"
+        with open(path, "a", encoding="utf-8") as fp:
+            fp.write(f"=== {kind} at {_dt.datetime.now().isoformat()} ===\n{msg}\n\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _write_exception(kind, exc_type, exc, tb) -> None:
     try:
         path = crashlog_dir() / f"crash-{_ts()}.log"
