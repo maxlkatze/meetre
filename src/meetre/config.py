@@ -17,16 +17,16 @@ CONFIG_DIR = Path(os.path.expanduser("~/.config/meetre"))
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 # Transcription models. Whisper sizes (smallest/fastest first; large-v3-turbo is
-# the best quality/speed balance on Apple Silicon and the default), plus NVIDIA
-# Parakeet TDT v3 on MLX (multilingual, very fast, supports live streaming).
+# the best Whisper quality/speed balance on Apple Silicon), plus NVIDIA Parakeet
+# TDT v3 on MLX (multilingual, very fast, supports live streaming; the default).
 MODELS = ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo",
           "parakeet-tdt-v3"]
 
 
 @dataclass
 class Config:
-    # Whisper model size used for transcription.
-    model: str = "large-v3-turbo"
+    # Transcription model (Whisper size or Parakeet).
+    model: str = "parakeet-tdt-v3"
     # Language code (e.g. "en", "de") or None to auto-detect. German by default.
     language: Optional[str] = "de"
     # Whether to run speaker diarization ("person detection").

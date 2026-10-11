@@ -52,7 +52,8 @@ text menu.
 meetre captures your microphone and the system audio (the other participants in
 Zoom, Meet, Teams, etc.), then:
 
-1. Transcribes locally with Whisper `large-v3-turbo` via MLX (Metal-accelerated).
+1. Transcribes locally with NVIDIA Parakeet TDT v3 via MLX (Metal-accelerated);
+   Whisper `large-v3-turbo` and other sizes are selectable.
 2. Optionally labels speakers using `pyannote` diarization.
 3. Summarises with a local LLM (Qwen3.5 / Gemma 4, auto-picked for your RAM)
    into Zusammenfassung / Entscheidungen / Aufgaben / Offene Fragen.
