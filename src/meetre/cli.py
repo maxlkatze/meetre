@@ -682,7 +682,8 @@ def do_config(cfg: Config, key: Optional[str] = None, value: Optional[str] = Non
                 "person_detection", "merged_analysis", "num_speakers", "min_speakers",
                 "max_speakers", "hf_token", "compute_type",
                 "summary_model", "auto_summarize", "auto_notes", "summary_prompt",
-                "auto_update", "detect_calls", "summary_overlay"]
+                "auto_update", "detect_calls", "summary_overlay",
+                "name_speakers", "my_name"]
     if key is None:
         from rich.table import Table
 

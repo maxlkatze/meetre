@@ -627,6 +627,9 @@ class MeetreApp(rumps.App if rumps else object):
         self.overlay_item = rumps.MenuItem("Live summary overlay",
                                            callback=self.on_toggle_overlay)
         self.overlay_item.state = 1 if self.cfg.summary_overlay else 0
+        self.names_item = rumps.MenuItem("Name speakers from conversation",
+                                         callback=self.on_toggle_names)
+        self.names_item.state = 1 if self.cfg.name_speakers else 0
 
         # "About meetre" groups the app-level actions (version, updates,
         # restart, start-at-login, quit) into one submenu so the top level stays
@@ -670,7 +673,9 @@ class MeetreApp(rumps.App if rumps else object):
             self.persons_item,
             self.calls_item,
             self.overlay_item,
+            self.names_item,
             None,
+            rumps.MenuItem(f"💬 Chat with {self._chat_model_label()}…", callback=self.on_chat),
             rumps.MenuItem("Settings…", callback=self.on_settings),
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
             rumps.MenuItem("Open last transcript", callback=self.on_open_last),
@@ -748,6 +753,33 @@ class MeetreApp(rumps.App if rumps else object):
         self.cfg.summary_overlay = not self.cfg.summary_overlay
         self.cfg.save()
         sender.state = 1 if self.cfg.summary_overlay else 0
+
+    def on_toggle_names(self, sender):
+        self.cfg.name_speakers = not self.cfg.name_speakers
+        self.cfg.save()
+        sender.state = 1 if self.cfg.name_speakers else 0
+
+    def _chat_model_label(self) -> str:
+        from . import summarizer
+
+        alias = self.cfg.summary_model
+        if not alias or alias == "auto":
+            alias = summarizer.default_model()
+        return "K2" if alias.startswith("k2-") else alias
+
+    def on_chat(self, sender=None):
+        from . import summarizer
+
+        if not summarizer.available():
+            rumps.alert("Chat needs mlx-lm", "Install it with: pip install mlx-lm")
+            return
+        win = getattr(self, "_chat", None)
+        if win is not None and win.is_open:
+            win.show()
+            return
+        from .chat import ChatWindow
+
+        self._chat = ChatWindow(self.cfg, self._chat_model_label())
 
     def on_toggle_calls(self, sender):
         self.cfg.detect_calls = not self.cfg.detect_calls
@@ -964,7 +996,11 @@ class MeetreApp(rumps.App if rumps else object):
                 mp3 = self.cfg.audio_backup_path / f"{started.strftime('%Y-%m-%d_%H-%M-%S')}_{_slugify(title)}.mp3"
                 rec.save_mp3(final_audio, mp3)
             except Exception:  # noqa: BLE001
-                pass
+                import sys
+
+                from . import crashlog
+
+                crashlog._write_exception("MP3 backup failed", *sys.exc_info())
 
             # Ensure the transcription model is present (shows a download bar).
             self._stage("Loading transcription model…")
@@ -1039,9 +1075,16 @@ class MeetreApp(rumps.App if rumps else object):
                         self._notify("meetre", "Speaker detection skipped", str(e))
                         use_persons = False
             if not segments:
+                from . import crashlog
+
+                crashlog.note("No speech detected", f"model={self.cfg.model} "
+                              f"duration={duration:.1f}s stems={sorted(stems)}")
                 self._notify("meetre", "Done", "No speech detected.")
                 return
             out["backend"] = backend
+
+            if use_persons:
+                self._name_speakers(segments)
 
             # Speakers are in: refresh the transcript while the summary runs.
             if self.cfg.person_detection and use_persons:
@@ -1075,6 +1118,11 @@ class MeetreApp(rumps.App if rumps else object):
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as e:  # noqa: BLE001
+            import sys
+
+            from . import crashlog
+
+            crashlog._write_exception("Recording failed", *sys.exc_info())
             self._notify("meetre", "Recording failed", str(e))
         finally:
             self._recorder = None
@@ -1160,6 +1208,38 @@ class MeetreApp(rumps.App if rumps else object):
                 self._download = None
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _name_speakers(self, segments) -> None:
+        """Replace anonymous speaker labels with real names, in place.
+
+        Your own side ("Me"/"Ich") becomes ``cfg.my_name``; the other labels are
+        named by the local LLM from explicit evidence in the conversation
+        (introductions, being addressed by name), verified against the text.
+        """
+        from . import summarizer, transcriber
+
+        lbl = transcriber._labels(self.cfg.language)
+        mapping = {}
+        if (self.cfg.my_name or "").strip():
+            mapping[lbl["local"]] = self.cfg.my_name.strip()
+        labels = list(dict.fromkeys(s.speaker for s in segments
+                                    if s.speaker and s.speaker not in mapping))
+        if (self.cfg.name_speakers and labels and summarizer.available()
+                and self.cfg.summary_model):
+            text = "\n".join(f"{s.speaker}: {s.text}" for s in segments if s.speaker)
+            try:
+                self._stage("Naming speakers…")
+                self._ensure_model(summarizer.resolve_model(self.cfg.summary_model),
+                                   f"Summary {self.cfg.summary_model}")
+                found = summarizer.infer_speaker_names(
+                    text, labels, model=self.cfg.summary_model, language=self.cfg.language)
+                taken = set(mapping.values())
+                mapping.update({k: v for k, v in found.items() if v not in taken})
+            except Exception:  # noqa: BLE001 — naming is best-effort
+                pass
+        for s in segments:
+            if s.speaker in mapping:
+                s.speaker = mapping[s.speaker]
 
     def _generate_summary(self, segments) -> str:
         """Run the local LLM over segments once; '' if disabled/unavailable."""

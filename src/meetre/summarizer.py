@@ -739,3 +739,215 @@ def _clean_title(text: str) -> str:
     # Strip surrounding quotes/markdown and trailing punctuation together so a
     # model that emits e.g. "Q3 Budget Review". loses both the period and quote.
     return line.strip().strip('"\'`*#.').strip()
+
+
+# ---------------------------------------------------------------------------
+# Interactive chat (menubar "Chat with K2…" window)
+# ---------------------------------------------------------------------------
+
+_chat_model = {"key": None, "lm": None, "tok": None}
+
+
+def _load_for_chat(model: Optional[str]):
+    """Load (and keep) the chat model so follow-up questions start instantly.
+
+    Summaries load and drop their model per meeting; the chat window keeps one
+    resident while it is open and calls :func:`release_chat_model` on close.
+    """
+    from mlx_lm import load
+
+    repo = resolve_model(model)
+    rev = model_revision(model)
+    if _chat_model["key"] != (repo, rev):
+        release_chat_model()
+        lm, tok = load(repo, revision=rev)
+        _chat_model.update(key=(repo, rev), lm=lm, tok=tok)
+    return _chat_model["lm"], _chat_model["tok"]
+
+
+def release_chat_model() -> None:
+    """Free the resident chat model (and the Metal buffers it holds)."""
+    _chat_model.update(key=None, lm=None, tok=None)
+    try:
+        import gc
+
+        import mlx.core as mx
+
+        gc.collect()
+        mx.clear_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+_CHAT_SYSTEM = {
+    "de": "Du bist K2, ein hilfreicher Assistent in meetre, einer lokalen "
+          "Meeting-App. Antworte präzise und auf Deutsch, außer der Nutzer "
+          "schreibt in einer anderen Sprache. Wenn ein Meeting-Transkript "
+          "mitgegeben wird, stütze dich darauf und erfinde nichts; zitiere bei "
+          "Bedarf Sprecher und Zeitstempel. Wenn Websuche-Ergebnisse mitgegeben "
+          "werden, nenne die verwendeten Quellen als [n].",
+    "en": "You are K2, a helpful assistant inside meetre, a local meeting app. "
+          "Answer concisely. When a meeting transcript is provided, ground your "
+          "answers in it and don't invent anything; cite speakers and "
+          "timestamps when useful. When web search results are provided, cite "
+          "the sources you used as [n].",
+}
+
+# Transcript budget for the chat context (~15k tokens): long meetings keep
+# their beginning and end, which is where agendas and wrap-ups live.
+_CHAT_TRANSCRIPT_CHARS = 60_000
+
+
+def _fit_transcript(text: str, limit: int = _CHAT_TRANSCRIPT_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}\n\n[… middle of the meeting omitted for length …]\n\n{text[-half:]}"
+
+
+def chat(
+    history: List[Dict[str, str]],
+    model: Optional[str] = None,
+    language: Optional[str] = None,
+    transcript: str = "",
+    web_results: str = "",
+    on_progress=None,
+    should_stop=None,
+    max_tokens: int = 1500,
+) -> str:
+    """Answer the last user turn of ``history`` ([{role, content}, …]).
+
+    ``transcript`` (a meeting .md body) and ``web_results`` (formatted search
+    hits) are injected as context. ``on_progress(phase, text)`` streams like
+    :func:`summarize` ("thinking" / "writing"); ``should_stop()`` → True aborts
+    generation and returns what was written so far.
+    """
+    if not available():
+        raise RuntimeError("Chat needs mlx-lm: pip install mlx-lm")
+    from mlx_lm import stream_generate
+
+    lm, tokenizer = _load_for_chat(model)
+    spec = _spec(model)
+    tmpl = dict((spec.template_kwargs if spec else None) or {})
+    thinks = model_thinks(model)
+    system = _CHAT_SYSTEM.get(language or "", _CHAT_SYSTEM["en"])
+    if transcript.strip():
+        label = _TRANSCRIPT_LABEL.get(language or "", "Transcript")
+        system += f"\n\n{label}:\n{_fit_transcript(transcript.strip())}"
+
+    messages = [{"role": "system", "content": system}] + [dict(m) for m in history]
+    if web_results.strip() and messages[-1]["role"] == "user":
+        messages[-1]["content"] = (f"Web search results:\n{web_results.strip()}\n\n"
+                                   f"Question: {messages[-1]['content']}")
+    try:
+        prompt = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, enable_thinking=thinks, **tmpl)
+    except TypeError:
+        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+
+    raw = ""
+    budget = max_tokens + (4000 if thinks else 0)
+    for resp in stream_generate(lm, tokenizer, prompt=prompt, max_tokens=budget):
+        raw += resp.text
+        if on_progress is not None and resp.text:
+            if thinks and not _THINK_CLOSE.search(raw):
+                on_progress("thinking", raw)
+            else:
+                on_progress("writing", _strip_thinking(raw))
+        if should_stop is not None and should_stop():
+            break
+    if thinks and not _THINK_CLOSE.search(raw):
+        return ""  # stopped (or ran out) mid-thought: no answer to show
+    return _strip_thinking(raw)
+
+
+# ---------------------------------------------------------------------------
+# Speaker naming: replace "Speaker 2" with the person's real name
+# ---------------------------------------------------------------------------
+#
+# Diarization only yields anonymous clusters. Current local approaches to name
+# them (LLM speaker-attribution / "speaker name identification" work, e.g.
+# DiarizationLM-style LLM post-processing) read the transcript for explicit
+# evidence — self-introductions ("Hi, I'm Anna"), being addressed by name
+# ("Thanks, Ben — what do you think?"), hand-offs and sign-offs. We ask the
+# local model for a JSON mapping plus its evidence, then *verify* every answer
+# against the transcript so a hallucinated name can never be applied.
+
+_NAME_INSTRUCTION = (
+    "Below is a meeting transcript with anonymous speaker labels. Identify the "
+    "real first name (or full name) of each speaker ONLY where the transcript "
+    "gives explicit evidence: the speaker introduces themselves, is addressed "
+    "by name right before they speak, or is named when handed the floor. "
+    "Do not guess. Leave a speaker out if unsure.\n\n"
+    "Answer with JSON only, e.g. "
+    '{"Speaker 1": {"name": "Anna", "evidence": "Thanks Anna, go ahead."}}\n\n'
+    "Speaker labels: {labels}"
+)
+
+
+def _parse_json_object(text: str) -> dict:
+    import json
+
+    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def infer_speaker_names(
+    text: str,
+    labels: List[str],
+    model: Optional[str] = None,
+    language: Optional[str] = None,
+) -> Dict[str, str]:
+    """Map anonymous speaker labels in ``text`` to real names (only verified).
+
+    ``text`` is the speaker-labelled transcript ("Speaker 1: …" lines). Returns
+    {label: name} for the speakers the model could name *and* whose name
+    actually occurs in the transcript; never two labels with the same name.
+    """
+    if not available() or not labels or not text.strip():
+        return {}
+    from mlx_lm import generate, load
+
+    repo = resolve_model(model)
+    spec = _spec(model)
+    tmpl = dict((spec.template_kwargs if spec else None) or {})
+    if "reasoning_effort" in tmpl:
+        tmpl["reasoning_effort"] = "low"
+    thinks = model_thinks(model)
+    lm, tokenizer = load(repo, revision=model_revision(model))
+    snippet = _fit_transcript(text.strip(), 40_000)
+    instruction = _NAME_INSTRUCTION.replace("{labels}", ", ".join(labels))
+    messages = [{"role": "user", "content": f"{instruction}\n\nTranscript:\n{snippet}"}]
+    try:
+        chat_prompt = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, enable_thinking=thinks, **tmpl)
+    except TypeError:
+        chat_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+    raw = generate(lm, tokenizer, prompt=chat_prompt,
+                   max_tokens=400 + (4000 if thinks else 0), verbose=False)
+    return _verified_names(_parse_json_object(_strip_thinking(raw)), labels, text)
+
+
+def _verified_names(data: dict, labels: List[str], text: str) -> Dict[str, str]:
+    """Keep only plausible names that literally occur in the transcript."""
+    body = text.lower()
+    out: Dict[str, str] = {}
+    for label, val in data.items():
+        if label not in labels:
+            continue
+        name = (val.get("name") if isinstance(val, dict) else val) or ""
+        name = str(name).strip().strip(".,:;\"'")
+        if not name or len(name) > 40 or not re.match(r"^[^\W\d_][\w .'-]*$", name):
+            continue
+        if name.lower() in {l.lower() for l in labels} or name.lower() not in body:
+            continue
+        if name in out.values():
+            continue  # two clusters can't be the same person by name
+        out[label] = name
+    return out
