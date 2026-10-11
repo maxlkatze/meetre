@@ -490,6 +490,26 @@ def model_revision(name_or_repo: Optional[str]) -> Optional[str]:
     return spec.revision if spec is not None else None
 
 
+def _load_model(model: Optional[str]):
+    """mlx_lm.load with the model's pinned revision.
+
+    Repos that ship their own architecture code (K2 Horizon's k2_horizon.py)
+    need ``trust_remote_code``; it is granted ONLY to specs pinned to a
+    reviewed commit, so unreviewed code can never run. Older mlx-lm releases
+    have no such flag (and executed the code unconditionally) — fall back.
+    """
+    from mlx_lm import load
+
+    repo = resolve_model(model)
+    rev = model_revision(model)
+    if rev:
+        try:
+            return load(repo, revision=rev, trust_remote_code=True)
+        except TypeError:
+            pass
+    return load(repo, revision=rev)
+
+
 def resolve_model(name: Optional[str]) -> str:
     """Accept a friendly alias, ``"auto"``, or a full HF repo id.
 
@@ -609,7 +629,7 @@ def summarize(
     if not text.strip():
         return ""
 
-    from mlx_lm import load, stream_generate
+    from mlx_lm import stream_generate
 
     repo = resolve_model(model)
     thinks = model_thinks(model)
@@ -619,7 +639,7 @@ def summarize(
     # Models with a reasoning_effort knob can't switch thinking off; their
     # fallback is a shorter reasoning pass instead of a direct answer.
     always_thinks = "reasoning_effort" in tmpl
-    lm, tokenizer = load(repo, revision=model_revision(model))
+    lm, tokenizer = _load_model(model)
     lang = language or ""
     system = _SYSTEM.get(lang, _SYSTEM["en"])
     instruction = (prompt or default_prompt(language)).strip()
@@ -702,7 +722,7 @@ def generate_title(
     if not text.strip():
         return ""
 
-    from mlx_lm import generate, load
+    from mlx_lm import generate
 
     repo = resolve_model(model)
     thinks = model_thinks(model)
@@ -710,7 +730,7 @@ def generate_title(
     tmpl = dict((spec.template_kwargs if spec else None) or {})
     if "reasoning_effort" in tmpl:
         tmpl["reasoning_effort"] = "low"  # a title doesn't need deep reasoning
-    lm, tokenizer = load(repo, revision=model_revision(model))
+    lm, tokenizer = _load_model(model)
     lang = language or ""
     system = _SYSTEM.get(lang, _SYSTEM["en"])
     instruction = _TITLE_INSTRUCTION.get(lang, _TITLE_INSTRUCTION["en"])
@@ -754,13 +774,11 @@ def _load_for_chat(model: Optional[str]):
     Summaries load and drop their model per meeting; the chat window keeps one
     resident while it is open and calls :func:`release_chat_model` on close.
     """
-    from mlx_lm import load
-
     repo = resolve_model(model)
     rev = model_revision(model)
     if _chat_model["key"] != (repo, rev):
         release_chat_model()
-        lm, tok = load(repo, revision=rev)
+        lm, tok = _load_model(model)
         _chat_model.update(key=(repo, rev), lm=lm, tok=tok)
     return _chat_model["lm"], _chat_model["tok"]
 
@@ -878,6 +896,8 @@ _NAME_INSTRUCTION = (
     "real first name (or full name) of each speaker ONLY where the transcript "
     "gives explicit evidence: the speaker introduces themselves, is addressed "
     "by name right before they speak, or is named when handed the floor. "
+    "A name a speaker says to someone else (\"Thanks Ben\", \"Ben, can you …\") "
+    "belongs to a DIFFERENT speaker — usually the one who answers next. "
     "Do not guess. Leave a speaker out if unsure.\n\n"
     "Answer with JSON only, e.g. "
     '{"Speaker 1": {"name": "Anna", "evidence": "Thanks Anna, go ahead."}}\n\n'
@@ -912,7 +932,7 @@ def infer_speaker_names(
     """
     if not available() or not labels or not text.strip():
         return {}
-    from mlx_lm import generate, load
+    from mlx_lm import generate
 
     repo = resolve_model(model)
     spec = _spec(model)
@@ -920,7 +940,7 @@ def infer_speaker_names(
     if "reasoning_effort" in tmpl:
         tmpl["reasoning_effort"] = "low"
     thinks = model_thinks(model)
-    lm, tokenizer = load(repo, revision=model_revision(model))
+    lm, tokenizer = _load_model(model)
     snippet = _fit_transcript(text.strip(), 40_000)
     instruction = _NAME_INSTRUCTION.replace("{labels}", ", ".join(labels))
     messages = [{"role": "user", "content": f"{instruction}\n\nTranscript:\n{snippet}"}]
@@ -932,6 +952,21 @@ def infer_speaker_names(
     raw = generate(lm, tokenizer, prompt=chat_prompt,
                    max_tokens=400 + (4000 if thinks else 0), verbose=False)
     return _verified_names(_parse_json_object(_strip_thinking(raw)), labels, text)
+
+
+_SELF_INTRO = (r"i'?m", r"i am", r"my name is", r"this is", r"ich bin", r"ich heiße",
+               r"mein name ist", r"hier ist")
+
+
+def _says_name_to_others(text: str, label: str, name: str) -> bool:
+    """True if ``label`` utters ``name`` but never to introduce themselves."""
+    own = " ".join(line.split(":", 1)[1] for line in text.splitlines()
+                   if line.startswith(f"{label}:")).lower()
+    n = re.escape(name.lower())
+    if not re.search(rf"\b{n}\b", own):
+        return False
+    intro = "|".join(_SELF_INTRO)
+    return not re.search(rf"\b(?:{intro})\s+{n}\b|\b{n}\s+(?:here|hier)\b", own)
 
 
 def _verified_names(data: dict, labels: List[str], text: str) -> Dict[str, str]:
@@ -949,5 +984,7 @@ def _verified_names(data: dict, labels: List[str], text: str) -> Dict[str, str]:
             continue
         if name in out.values():
             continue  # two clusters can't be the same person by name
+        if _says_name_to_others(text, label, name):
+            continue  # they address someone else by it ("Thanks Ben")
         out[label] = name
     return out
