@@ -288,12 +288,27 @@ def _transcribe_parakeet(audio_path, model, progress=None) -> List[Segment]:
     # chunk_duration enables progress + bounds memory on long meetings.
     result = pk.transcribe(str(audio_path), chunk_duration=120.0, chunk_callback=cb)
     out: List[Segment] = [
-        Segment(start=float(s.start), end=float(s.end), text=s.text.strip())
+        Segment(start=float(s.start), end=float(s.end), text=s.text.strip(),
+                words=_parakeet_words(s.tokens))
         for s in result.sentences
     ]
     if not out and result.text.strip():
         out.append(Segment(start=0.0, end=0.0, text=result.text.strip()))
     return out
+
+
+def _parakeet_words(tokens) -> Optional[list]:
+    """Merge Parakeet's sub-word tokens into timed words (a token that starts
+    with a space begins a new word; the space is kept for re-joining)."""
+    words: list = []
+    for t in tokens or []:
+        text = str(t.text)
+        if words and not text.startswith(" "):
+            words[-1]["word"] += text
+            words[-1]["end"] = float(t.end)
+        else:
+            words.append({"word": text, "start": float(t.start), "end": float(t.end)})
+    return words or None
 
 
 def _transcribe_faster(audio_path, model, language, compute_type, progress) -> List[Segment]:
@@ -406,30 +421,15 @@ def transcribe_attributed(
     if _silent(system):
         system = None
 
-    def _energy(arr, start, end):
-        if arr is None:
-            return 0.0
-        a, b = max(0, int(start * 16_000)), min(len(arr), int(end * 16_000))
-        return _rms(arr[a:b]) if b > a else 0.0
+    # 1) Attribute every WORD to a side (you vs. remote) from the stems —
+    #    each normalised to its own noise floor, with the call's echo on the
+    #    mic subtracted — and split segments where the speaker changes. With
+    #    one side skipped (silent), everything falls to the side that recorded.
+    from .attribution import split_by_side
 
-    # 1) Attribute each segment to a side (you vs. remote) by which stem is
-    #    louder over the segment window. With one side skipped (silent), every
-    #    segment falls to the side that actually recorded audio.
-    mic_segs, sys_segs = [], []
-    for seg in segments:
-        if system is None:
-            mic_segs.append(seg)
-        elif mic is None:
-            sys_segs.append(seg)
-        elif _energy(mic, seg.start, seg.end) >= _energy(system, seg.start, seg.end):
-            mic_segs.append(seg)
-        else:
-            sys_segs.append(seg)
-
-    for s in mic_segs:
-        s.speaker = lbl["local"]
-    for s in sys_segs:
-        s.speaker = lbl["remote"]
+    segments = split_by_side(segments, mic, system, lbl["local"], lbl["remote"])
+    mic_segs = [s for s in segments if s.speaker == lbl["local"]]
+    sys_segs = [s for s in segments if s.speaker == lbl["remote"]]
     if on_transcribed is not None:
         on_transcribed(segments)
 
@@ -641,18 +641,48 @@ def _best_turn(turns: List[tuple], start: float, end: float) -> Optional[str]:
     return best
 
 
+# A diarization cluster only counts as its own person on a side when it holds
+# a real share of that side's speech; otherwise its few segments are boundary
+# spill-over (e.g. the other side's voice cluster leaking in around turn
+# changes when analysing the mix) and get folded into the side's main voice.
+_MIN_CLUSTER_SECONDS = 4.0
+_MIN_CLUSTER_SHARE = 0.10
+
+
 def _assign_side(side_segs: List[Segment], turns: List[tuple],
                  single_label: str, multi_label: str) -> None:
     """Label segments on one side; use a numbered scheme only if >1 speaker."""
     raws = [_best_turn(turns, s.start, s.end) for s in side_segs]
-    uniq = list(dict.fromkeys(r for r in raws if r is not None))
-    if len(uniq) <= 1:
+    talk: dict = {}
+    for seg, r in zip(side_segs, raws):
+        if r is not None:
+            talk[r] = talk.get(r, 0.0) + max(seg.end - seg.start, 0.0)
+    total = sum(talk.values())
+    real = [r for r, t in talk.items()
+            if t >= _MIN_CLUSTER_SECONDS and t >= _MIN_CLUSTER_SHARE * total]
+    if len(real) <= 1:
         for s in side_segs:
             s.speaker = single_label
-    else:
-        order = {u: i + 1 for i, u in enumerate(uniq)}
-        for s, r in zip(side_segs, raws):
-            s.speaker = f"{multi_label} {order[r]}" if r in order else f"{multi_label} 1"
+        return
+    # Number the real voices in order of first appearance; fold spill-over
+    # clusters (and unmatched segments) into the nearest real voice in time.
+    first = {}
+    for seg, r in zip(side_segs, raws):
+        if r in real and r not in first:
+            first[r] = seg.start
+    order = {r: i + 1 for i, r in enumerate(sorted(real, key=first.get))}
+    prev = None
+    labels = []
+    for r in raws:
+        labels.append(r if r in order else prev)
+        prev = labels[-1] or prev
+    nxt = None
+    for i in range(len(labels) - 1, -1, -1):
+        if labels[i] is None:
+            labels[i] = nxt
+        nxt = labels[i] or nxt
+    for seg, r in zip(side_segs, labels):
+        seg.speaker = f"{multi_label} {order.get(r, 1)}"
 
 
 def diarize(
@@ -667,6 +697,11 @@ def diarize(
     """Assign a "Speaker N" label to each segment using pyannote on one file."""
     turns = diarize_turns(audio_path, hf_token, num_speakers, min_speakers,
                           max_speakers, progress=progress)
+    # Split sentences at speaker changes using word timings, so a sentence
+    # that spans two people isn't given entirely to one of them.
+    from .attribution import split_by_turns
+
+    segments = split_by_turns(segments, turns)
     label_map: dict = {}
     for seg in segments:
         raw = _best_turn(turns, seg.start, seg.end)
