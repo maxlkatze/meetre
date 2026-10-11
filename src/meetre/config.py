@@ -11,7 +11,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 CONFIG_DIR = Path(os.path.expanduser("~/.config/meetre"))
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -94,6 +94,15 @@ class Config:
     name_speakers: bool = True
     # Your own name: replaces "Me"/"Ich" (the microphone side) in transcripts.
     my_name: str = ""
+    # Chat tools (Tools & MCP window). The model decides when to call them.
+    tool_web_search: bool = True
+    tool_files: bool = True
+    # Folders the chat model may always read ("Always allow"); others prompt.
+    tool_folders: List[str] = field(default_factory=list)
+    # MCP servers, Claude Desktop format: {name: {command, args, env, enabled}}.
+    mcp_servers: Dict[str, dict] = field(default_factory=dict)
+    # MCP tools allowed without asking ("server/tool").
+    mcp_allowed_tools: List[str] = field(default_factory=list)
 
     @property
     def transcripts_path(self) -> Path:

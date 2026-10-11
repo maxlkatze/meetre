@@ -676,6 +676,7 @@ class MeetreApp(rumps.App if rumps else object):
             self.names_item,
             None,
             rumps.MenuItem(f"💬 Chat with {self._chat_model_label()}…", callback=self.on_chat),
+            rumps.MenuItem("🔧 Tools & MCP…", callback=self.on_tools),
             rumps.MenuItem("Settings…", callback=self.on_settings),
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
             rumps.MenuItem("Open last transcript", callback=self.on_open_last),
@@ -780,6 +781,15 @@ class MeetreApp(rumps.App if rumps else object):
         from .chat import ChatWindow
 
         self._chat = ChatWindow(self.cfg, self._chat_model_label())
+
+    def on_tools(self, sender=None):
+        win = getattr(self, "_tools_win", None)
+        if win is not None and win.is_open:
+            win.show()
+            return
+        from .toolswindow import ToolsWindow
+
+        self._tools_win = ToolsWindow(self.cfg)
 
     def on_toggle_calls(self, sender):
         self.cfg.detect_calls = not self.cfg.detect_calls

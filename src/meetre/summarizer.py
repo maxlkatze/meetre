@@ -832,6 +832,9 @@ def chat(
     on_progress=None,
     should_stop=None,
     max_tokens: int = 1500,
+    tools=None,
+    on_tool=None,
+    max_rounds: int = 6,
 ) -> str:
     """Answer the last user turn of ``history`` ([{role, content}, …]).
 
@@ -839,16 +842,27 @@ def chat(
     hits) are injected as context. ``on_progress(phase, text)`` streams like
     :func:`summarize` ("thinking" / "writing"); ``should_stop()`` → True aborts
     generation and returns what was written so far.
+
+    ``tools`` (a :class:`meetre.tools.ToolBox`) enables native tool calling:
+    the model may emit tool calls, which are executed (``on_tool(label,
+    result_or_None)`` reports start/finish) and fed back, up to ``max_rounds``.
     """
     if not available():
         raise RuntimeError("Chat needs mlx-lm: pip install mlx-lm")
     from mlx_lm import stream_generate
+
+    from . import tools as _tools
 
     lm, tokenizer = _load_for_chat(model)
     spec = _spec(model)
     tmpl = dict((spec.template_kwargs if spec else None) or {})
     thinks = model_thinks(model)
     system = _CHAT_SYSTEM.get(language or "", _CHAT_SYSTEM["en"])
+    schemas = tools.schemas() if tools is not None else []
+    if schemas:
+        system += ("\n\nYou can call tools (web search, reading the user's files, "
+                   "MCP servers). Use them when the question needs fresh or "
+                   "external information; don't call tools for things you already know.")
     if transcript.strip():
         label = _TRANSCRIPT_LABEL.get(language or "", "Transcript")
         system += f"\n\n{label}:\n{_fit_transcript(transcript.strip())}"
@@ -857,26 +871,46 @@ def chat(
     if web_results.strip() and messages[-1]["role"] == "user":
         messages[-1]["content"] = (f"Web search results:\n{web_results.strip()}\n\n"
                                    f"Question: {messages[-1]['content']}")
-    try:
-        prompt = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, enable_thinking=thinks, **tmpl)
-    except TypeError:
-        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
 
-    raw = ""
+    def render() -> str:
+        kw = dict(tmpl)
+        if schemas:
+            kw.update(tools=schemas)  # K2 native (xml) tool-call format
+        try:
+            return tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, enable_thinking=thinks, **kw)
+        except TypeError:
+            return tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+
     budget = max_tokens + (4000 if thinks else 0)
-    for resp in stream_generate(lm, tokenizer, prompt=prompt, max_tokens=budget):
-        raw += resp.text
-        if on_progress is not None and resp.text:
-            if thinks and not _THINK_CLOSE.search(raw):
-                on_progress("thinking", raw)
-            else:
-                on_progress("writing", _strip_thinking(raw))
-        if should_stop is not None and should_stop():
-            break
-    if thinks and not _THINK_CLOSE.search(raw):
-        return ""  # stopped (or ran out) mid-thought: no answer to show
-    return _strip_thinking(raw)
+    for _round in range(max_rounds + 1):
+        raw = ""
+        for resp in stream_generate(lm, tokenizer, prompt=render(), max_tokens=budget):
+            raw += resp.text
+            if on_progress is not None and resp.text:
+                if thinks and not _THINK_CLOSE.search(raw):
+                    on_progress("thinking", raw)
+                else:
+                    on_progress("writing", _tools.strip_tool_calls(_strip_thinking(raw)))
+            if should_stop is not None and should_stop():
+                break
+        if thinks and not _THINK_CLOSE.search(raw):
+            return ""  # stopped (or ran out) mid-thought: no answer to show
+        answer = _strip_thinking(raw)
+        calls = _tools.parse_tool_calls(answer) if schemas else []
+        if not calls or (should_stop is not None and should_stop()) or _round == max_rounds:
+            return _tools.strip_tool_calls(answer) if schemas else answer
+        messages.append({"role": "assistant", "content": _tools.strip_tool_calls(answer),
+                         "tool_calls": [{"type": "function", "function": c} for c in calls]})
+        for c in calls:
+            label = tools.label(c["name"], c["arguments"])
+            if on_tool is not None:
+                on_tool(label, None)
+            result = tools.call(c["name"], c["arguments"])
+            if on_tool is not None:
+                on_tool(label, result)
+            messages.append({"role": "tool", "name": c["name"], "content": result})
+    return ""
 
 
 # ---------------------------------------------------------------------------

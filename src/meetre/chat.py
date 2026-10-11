@@ -2,8 +2,8 @@
 
 Pick a meeting from the dropdown to chat *about* it (the transcript becomes the
 model's context), or "No meeting" for a free chat. Quick-prompt chips cover the
-common asks; "Web search" (off by default) adds DuckDuckGo results for the
-question — the only thing that leaves the machine, and only when ticked.
+common asks. "Tools…" opens the Tools & MCP window: web search and file reading
+(on by default, folder access asks first) plus MCP servers.
 
 Thread model mirrors :mod:`meetre.overlay`: generation runs on a worker thread
 that only stores state; a main-thread timer (:meth:`ChatWindow.tick`) does all
@@ -59,8 +59,8 @@ def _controller_class():
         def chip_(self, sender):
             self.owner.on_chip(int(sender.tag()))
 
-        def toggleWeb_(self, sender):
-            self.owner.on_toggle_web(bool(sender.state()))
+        def openTools_(self, sender):
+            self.owner.on_open_tools()
 
         def copyLast_(self, sender):
             self.owner.on_copy_last()
@@ -100,13 +100,16 @@ class ChatWindow:
         self.lang = "de" if cfg.language == "de" else "en"
         self._lock = threading.Lock()
         self.history: List[dict] = []      # [{role, content}] sent to the model
-        self.sources: List[list] = []      # web hits per assistant turn
+        self.steps: List[list] = []        # tool-call labels per assistant turn
+        self._live_steps: List[str] = []   # … for the turn being generated
+        self._mcp = None                   # running MCPManager
+        self._mcp_key = None               # servers config it was started with
+        self._tools_win = None
         self._live = None                  # (phase, text) while generating
         self._status = ""
         self._busy = False
         self._stop = False
         self._dirty = True
-        self._web = False
         self._files: List[Path] = []
         self._meeting: Optional[Path] = None
         self._window = None
@@ -152,15 +155,14 @@ class ChatWindow:
         root.addSubview_(pop)
         self._pop = pop
 
-        web = NSButton.alloc().initWithFrame_(NSMakeRect(W - 240, top, 120, 26))
-        web.setButtonType_(3)  # switch (checkbox)
-        web.setTitle_("Web search")
-        web.setToolTip_("Sends your question (never audio or transcript) to "
-                        "DuckDuckGo and gives K2 the top results.")
-        web.setTarget_(ctrl)
-        web.setAction_("toggleWeb:")
-        web.setAutoresizingMask_(1 | 8)  # flexible left margin
-        root.addSubview_(web)
+        tools_btn = NSButton.alloc().initWithFrame_(NSMakeRect(W - 232, top - 2, 112, 30))
+        tools_btn.setTitle_("🔧 Tools…")
+        tools_btn.setBezelStyle_(1)
+        tools_btn.setToolTip_("Web search, file access and MCP servers")
+        tools_btn.setTarget_(ctrl)
+        tools_btn.setAction_("openTools:")
+        tools_btn.setAutoresizingMask_(1 | 8)  # flexible left margin
+        root.addSubview_(tools_btn)
 
         new = NSButton.alloc().initWithFrame_(NSMakeRect(W - PAD - 104, top - 2, 104, 30))
         new.setTitle_("New chat")
@@ -300,14 +302,20 @@ class ChatWindow:
             self.on_new_chat()  # a different meeting starts a fresh conversation
         self._update_chips()
 
-    def on_toggle_web(self, on: bool) -> None:
-        self._web = on
+    def on_open_tools(self) -> None:
+        if self._tools_win is not None and self._tools_win.is_open:
+            self._tools_win.show()
+            return
+        from .toolswindow import ToolsWindow
+
+        self._tools_win = ToolsWindow(self.cfg, on_change=lambda: self._set_status(
+            "Tools updated — used from the next question"))
 
     def on_new_chat(self) -> None:
         if self._busy:
             self._stop = True
         with self._lock:
-            self.history, self.sources, self._live = [], [], None
+            self.history, self.steps, self._live, self._live_steps = [], [], None, []
             self._status = ""
             self._dirty = True
 
@@ -328,10 +336,10 @@ class ChatWindow:
         self._field.setStringValue_("")
         with self._lock:
             self.history.append({"role": "user", "content": text})
-            self._live = ("thinking", "")
+            self._live, self._live_steps = ("thinking", ""), []
             self._busy, self._stop, self._dirty = True, False, True
         self._send_btn.setTitle_("Stop")
-        threading.Thread(target=self._answer, args=(text, self._meeting, self._web),
+        threading.Thread(target=self._answer, args=(text, self._meeting),
                          daemon=True).start()
 
     def on_copy_last(self) -> None:
@@ -358,6 +366,9 @@ class ChatWindow:
             from . import summarizer
 
             summarizer.release_chat_model()
+            if self._mcp is not None:
+                self._mcp.stop_all()
+                self._mcp = None
 
         threading.Thread(target=release, daemon=True).start()
 
@@ -367,22 +378,39 @@ class ChatWindow:
         with self._lock:
             self._status, self._dirty = s, True
 
-    def _answer(self, question: str, meeting: Optional[Path], web: bool) -> None:
+    def _toolbox(self):
+        """Tools for this question; (re)starts MCP servers when their config changed."""
+        import json
+
+        from .mcp import MCPManager
+        from .tools import ToolBox
+
+        servers = {k: v for k, v in (self.cfg.mcp_servers or {}).items() if v.get("enabled", True)}
+        key = json.dumps(servers, sort_keys=True)
+        if key != self._mcp_key:
+            if self._mcp is not None:
+                self._mcp.stop_all()
+            self._mcp, self._mcp_key = None, key
+            if servers:
+                self._set_status(f"Starting {len(servers)} MCP server(s)…")
+                self._mcp = MCPManager(servers)
+                self._mcp.start_all()
+                failed = [s.name for s in self._mcp.servers.values() if s.error]
+                if failed:
+                    self._set_status(f"MCP failed: {', '.join(failed)} (see Tools…)")
+        if not (self.cfg.tool_web_search or self.cfg.tool_files or self._mcp):
+            return None
+        return ToolBox(self.cfg, web=self.cfg.tool_web_search,
+                       files=self.cfg.tool_files, mcp=self._mcp)
+
+    def _answer(self, question: str, meeting: Optional[Path]) -> None:
         from . import downloads, summarizer
 
-        answer, hits = "", []
+        answer = ""
         started = time.monotonic()
         try:
             transcript = meeting.read_text() if meeting else ""
-            web_ctx = ""
-            if web:
-                self._set_status("🌐 Searching the web…")
-                try:
-                    from . import websearch
-
-                    web_ctx, hits = websearch.context_for(question)
-                except Exception as e:  # noqa: BLE001
-                    self._set_status(f"Web search failed ({e}) — answering offline")
+            toolbox = self._toolbox()
             repo = summarizer.resolve_model(self.cfg.summary_model)
             if not downloads.is_cached(repo):
                 self._set_status(f"⬇ Downloading {self.model_label}…")
@@ -398,17 +426,28 @@ class ChatWindow:
                     secs = time.monotonic() - started
                     self._status = f"{self.model_label} · {phase}… {secs:.0f}s"
 
+            def on_tool(label, result):
+                with self._lock:
+                    if result is None:
+                        self._live_steps.append(label)
+                        self._live = ("thinking", "")
+                        self._status = f"{label[:60]} …"
+                    elif result.startswith("ERROR"):
+                        self._live_steps[-1] = f"{label}  ⚠︎ {result[7:80]}"
+                    self._dirty = True
+
             answer = summarizer.chat(
                 history, model=self.cfg.summary_model, language=self.cfg.language,
-                transcript=transcript, web_results=web_ctx,
-                on_progress=progress, should_stop=lambda: self._stop)
+                transcript=transcript, on_progress=progress,
+                should_stop=lambda: self._stop, tools=toolbox, on_tool=on_tool)
             if not answer and self._stop:
                 answer = "_(stopped)_"
             elif not answer:
                 answer = "_(no answer — try rephrasing)_"
             secs = time.monotonic() - started
+            used = len(self._live_steps)
             self._set_status(f"{self.model_label} · {secs:.0f}s · "
-                             + ("web + on-device" if hits else "on-device"))
+                             + (f"{used} tool call(s)" if used else "on-device"))
         except Exception as e:  # noqa: BLE001
             answer = f"_Error: {e}_"
             self._set_status("Error")
@@ -417,8 +456,9 @@ class ChatWindow:
                 # A "New chat" during generation already cleared the history.
                 if self.history and self.history[-1]["role"] == "user":
                     self.history.append({"role": "assistant", "content": answer})
-                    self.sources.append(list(hits))
-                self._live, self._busy, self._dirty = None, False, True
+                    self.steps.append(list(self._live_steps))
+                self._live, self._live_steps = None, []
+                self._busy, self._dirty = False, True
 
     # -- rendering (main thread) ------------------------------------------------
 
@@ -435,15 +475,16 @@ class ChatWindow:
         with self._lock:
             dirty, self._dirty = self._dirty, False
             history = list(self.history)
-            sources = list(self.sources)
+            steps = list(self.steps)
+            live_steps = list(self._live_steps)
             live, status, busy = self._live, self._status, self._busy
         if not dirty and not (busy and self._frame % 8 == 0):
             return
         self._send_btn.setTitle_("Stop" if busy else "Send")
         self._status_lbl.setStringValue_(status or f"{self.model_label} · on-device")
-        self._render(history, sources, live)
+        self._render(history, steps, live, live_steps)
 
-    def _render(self, history, sources, live) -> None:
+    def _render(self, history, steps, live, live_steps) -> None:
         from AppKit import (
             NSFontAttributeName, NSForegroundColorAttributeName, NSLinkAttributeName,
             NSMutableAttributedString, NSMutableParagraphStyle,
@@ -477,8 +518,13 @@ class ChatWindow:
 
         if not history:
             hint = ("Ask about the selected meeting — or pick “No meeting” to chat "
-                    "freely. Everything runs on this Mac; web search is opt-in.")
+                    "freely. K2 runs on this Mac and can search the web, read files "
+                    "you allow and use MCP servers (🔧 Tools…).")
             add(hint + "\n", _sans(12.5), _white(0.45))
+
+        def tool_steps(labels):
+            for lab in labels:
+                add(f"   {lab}\n", _sans(11), _white(0.45))
 
         answer_i = 0
         for m in history:
@@ -487,16 +533,15 @@ class ChatWindow:
                 add(m["content"] + "\n\n", _sans(13, 0.3), _white(0.95))
             else:
                 add(f"{self.model_label}\n", _sans(10.5, 0.5), _accent())
+                tool_steps(steps[answer_i] if answer_i < len(steps) else [])
                 markdown(m["content"], _white(0.86))
-                hits = sources[answer_i] if answer_i < len(sources) else []
-                for i, h in enumerate(hits, 1):
-                    add(f"[{i}] {h.title}\n", _sans(11), _accent(), link=h.url)
                 add("\n", _sans(6), _white(0.5))
                 answer_i += 1
 
         if live is not None:
             phase, text = live
             add(f"{self.model_label}\n", _sans(10.5, 0.5), _accent())
+            tool_steps(live_steps)
             dot = "●" if (self._frame // 8) % 2 == 0 else "○"
             if phase == "thinking":
                 tail = text.strip()[-600:]
