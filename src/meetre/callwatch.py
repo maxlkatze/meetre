@@ -169,17 +169,19 @@ def teams_call_active() -> bool:
 
 
 class CallWatcher:
-    """Poll in a background thread and fire ``on_start`` once per call.
+    """Poll in a background thread; fire ``on_start`` / ``on_end`` once per call.
 
     A call must be seen on ``confirm`` consecutive polls before it counts (so a
     quick mic test doesn't trigger), and must be gone for ``end_grace`` seconds
-    before the next one can fire (so a brief mute/device switch doesn't re-ask).
-    ``on_start`` runs on the watcher thread — hand off to the main thread.
+    before it counts as ended (so a brief mute/device switch doesn't re-ask).
+    Both callbacks run on the watcher thread — hand off to the main thread.
     """
 
-    def __init__(self, on_start: Callable[[], None], *, interval: float = 3.0,
+    def __init__(self, on_start: Callable[[], None],
+                 on_end: Optional[Callable[[], None]] = None, *, interval: float = 3.0,
                  confirm: int = 2, end_grace: float = 20.0):
         self.on_start = on_start
+        self.on_end = on_end
         self.interval = interval
         self.confirm = confirm
         self.end_grace = end_grace
@@ -219,3 +221,8 @@ class CallWatcher:
                 seen = 0
                 if self.in_call and now - last_seen >= self.end_grace:
                     self.in_call = False
+                    if self.on_end is not None:
+                        try:
+                            self.on_end()
+                        except Exception:  # noqa: BLE001
+                            pass

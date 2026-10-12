@@ -383,25 +383,19 @@ def _prompt_controller_class():
     import objc
 
     class _CallPromptController(objc.lookUpClass("NSObject")):
-        def recordClicked_(self, sender):
-            self.on_choice("record")
-
-        def settingsClicked_(self, sender):
-            self.on_choice("settings")
-
-        def dismissClicked_(self, sender):
-            self.on_choice("dismiss")
+        def clicked_(self, sender):
+            self.on_choice(self.choices[sender.tag()])
 
     _PROMPT_CLASS = _CallPromptController
     return _PROMPT_CLASS
 
 
-def _show_call_prompt(status_item, app_name: str, on_choice):
-    """Pop a small panel down from the menu-bar icon asking to record a call.
+def _show_call_prompt(status_item, title: str, message: str, buttons, on_choice):
+    """Pop a small panel down from the menu-bar icon asking about a call.
 
-    ``on_choice(choice)`` gets "record" (previous settings), "settings" (open
-    the recording dialog) or "dismiss". Returns the controller, which the
-    caller must retain; ``ctrl.close()`` dismisses the popover.
+    ``buttons`` is a left-to-right list of ``(label, choice, key_equivalent)``;
+    ``on_choice(choice)`` gets the clicked button's choice. Returns the
+    controller, which the caller must retain; ``ctrl.close()`` dismisses it.
     """
     from AppKit import (
         NSApp, NSButton, NSFont, NSMakeRect, NSPopover, NSTextField, NSView,
@@ -417,24 +411,35 @@ def _show_call_prompt(status_item, app_name: str, on_choice):
         lbl.setFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 18))
         view.addSubview_(lbl)
 
-    text(f"{app_name} call started", H - PAD - 18, bold=True)
-    text("Record and transcribe this meeting?", H - PAD - 40)
+    text(title, H - PAD - 18, bold=True)
+    text(message, H - PAD - 40)
 
     ctrl = _prompt_controller_class().alloc().init()
     popover = NSPopover.alloc().init()
 
-    def button(title, x, w, action, key=""):
+    ctrl.choices = [choice for _, choice, _ in buttons]
+
+    def button(label, x, w, tag, key=""):
         b = NSButton.alloc().initWithFrame_(NSMakeRect(x, PAD - 4, w, 32))
-        b.setTitle_(title)
+        b.setTitle_(label)
         b.setBezelStyle_(1)
         b.setKeyEquivalent_(key)
+        b.setTag_(tag)
         b.setTarget_(ctrl)
-        b.setAction_(action)
+        b.setAction_("clicked:")
         view.addSubview_(b)
 
-    button("Not now", PAD - 6, 90, "dismissClicked:", "\x1b")
-    button("Record…", W - PAD - 196, 98, "settingsClicked:")
-    button("Record", W - PAD - 94, 100, "recordClicked:", "\r")
+    # First button hugs the left edge; the rest are right-aligned.
+    widths = [90] + [100] * (len(buttons) - 1)
+    x = W - PAD + 6
+    xs = []
+    for w in reversed(widths[1:]):
+        x -= w
+        xs.insert(0, x)
+        x += 2
+    xs.insert(0, PAD - 6)
+    for i, (label, _, key) in enumerate(buttons):
+        button(label, xs[i], widths[i], i, key)
 
     vc = NSViewController.alloc().init()
     vc.setView_(view)
@@ -486,6 +491,8 @@ class MeetreApp(rumps.App if rumps else object):
         self._call_started = False   # set by the call watcher thread
         self._call_prompt = None     # open "record this call?" popover
         self._call_prompt_at = 0.0   # when it was shown (auto-dismiss)
+        self._call_ended = False     # set by the call watcher thread
+        self._end_prompt = None      # open "stop recording?" popover
         self._update_available = False   # set by the update-check thread
         self._update_shown = False       # what the icon/menu currently show
         self._restart_requested = False  # "install update & restart" pulled
@@ -539,7 +546,7 @@ class MeetreApp(rumps.App if rumps else object):
         # Watch for Teams calls and offer to record them.
         from .callwatch import CallWatcher
 
-        self._call_watcher = CallWatcher(self._on_call_started)
+        self._call_watcher = CallWatcher(self._on_call_started, self._on_call_ended)
         if self.cfg.detect_calls:
             self._call_watcher.start()
 
@@ -800,6 +807,7 @@ class MeetreApp(rumps.App if rumps else object):
         else:
             self._call_watcher.stop()
             self._close_call_prompt()
+            self._close_end_prompt()
 
     # -- call detection -----------------------------------------------------
 
@@ -812,7 +820,11 @@ class MeetreApp(rumps.App if rumps else object):
             return
         try:
             ctrl = _show_call_prompt(
-                self._nsapp.nsstatusitem, "Microsoft Teams", self._on_call_choice)
+                self._nsapp.nsstatusitem, "Microsoft Teams call started",
+                "Record and transcribe this meeting?",
+                [("Not now", "dismiss", "\x1b"), ("Record…", "settings", ""),
+                 ("Record", "record", "\r")],
+                self._on_call_choice)
             if not ctrl.popover.isShown():
                 # Too early (app still launching): retry on the next tick.
                 self._call_started = self._call_watcher.in_call
@@ -835,6 +847,37 @@ class MeetreApp(rumps.App if rumps else object):
             self.on_record_previous()
         elif choice == "settings":
             self.on_record()
+
+    def _on_call_ended(self):
+        # Watcher thread: just flag it; _tick shows the popover on the main thread.
+        self._call_ended = True
+
+    def _show_end_prompt(self):
+        if self.state != "recording" or self._end_prompt is not None:
+            return
+        try:
+            ctrl = _show_call_prompt(
+                self._nsapp.nsstatusitem, "Microsoft Teams call ended",
+                "Stop the recording and transcribe it?",
+                [("Keep going", "keep", "\x1b"), ("Stop", "stop", "\r")],
+                self._on_end_choice)
+            if not ctrl.popover.isShown():
+                self._call_ended = True  # retry on the next tick
+                return
+            self._end_prompt = ctrl
+        except Exception:  # noqa: BLE001
+            self._post("meetre", "Microsoft Teams call ended",
+                       "Still recording — click the meetre icon → Stop to finish.")
+
+    def _close_end_prompt(self):
+        if self._end_prompt is not None:
+            self._end_prompt.close()
+            self._end_prompt = None
+
+    def _on_end_choice(self, choice):
+        self._end_prompt = None
+        if choice == "stop":
+            self.on_stop()
 
     # -- settings window ----------------------------------------------------
 
@@ -1569,6 +1612,14 @@ class MeetreApp(rumps.App if rumps else object):
                 self.state != "idle" or not self._call_watcher.in_call
                 or time.monotonic() - self._call_prompt_at > 120):
             self._close_call_prompt()
+        if self._call_ended:
+            self._call_ended = False
+            self._show_end_prompt()
+        # Unanswered end prompt: drop it once recording stopped some other way
+        # or the call resumed. Otherwise it stays — recording keeps running.
+        if self._end_prompt is not None and (
+                self.state != "recording" or self._call_watcher.in_call):
+            self._close_end_prompt()
         self._spin = (self._spin + 1) % len(SPINNER)
         if self.state == "recording" and self._recorder is not None:
             m, s = divmod(int(self._recorder.seconds), 60)
