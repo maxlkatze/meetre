@@ -375,6 +375,17 @@ _REMINDER = {
           "sections (Summary, Decisions, Action items, Open questions).",
 }
 
+_TRANSCRIPT_LABEL = {"de": "Transkript", "en": "Transcript"}
+
+_TITLE_INSTRUCTION = {
+    "de": "Gib einen kurzen, konkreten Titel für dieses Meeting an — 3 bis 8 "
+          "Wörter, der das Kernthema benennt. Keine Anführungszeichen, kein "
+          "Punkt am Ende, keine Vorrede. Antworte mit NUR dem Titel.",
+    "en": "Give a short, concrete title for this meeting — 3 to 8 words naming "
+          "the core topic. No quotes, no trailing period, no preamble. Respond "
+          "with ONLY the title.",
+}
+
 _REDUCE = {
     "de": "Unten stehen Teil-Zusammenfassungen aufeinanderfolgender Abschnitte "
           "EINES Meetings. Führe sie zu einer einzigen Zusammenfassung auf "
