@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Repair "command not found: meetre": relink the binary into ~/.local/bin and
+# make sure ~/.local/bin is on PATH in your shell rc. Safe to re-run.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+BIN="$ROOT/.venv/bin/meetre"
+
+if [ ! -x "$BIN" ]; then
+  echo "✗ $BIN not found — meetre isn't installed yet. Run: bash install.sh" >&2
+  exit 1
+fi
+
+mkdir -p "$HOME/.local/bin"
+ln -sf "$BIN" "$HOME/.local/bin/meetre"
+echo "✓ Linked meetre → ~/.local/bin/meetre"
+
+LINE='export PATH="$HOME/.local/bin:$PATH"'
+for RC in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bashrc"; do
+  case "$RC" in *bashrc) [ "${SHELL##*/}" = "bash" ] || continue ;; esac
+  if ! grep -qsF "$LINE" "$RC"; then
+    printf '\n# meetre\n%s\n' "$LINE" >> "$RC"
+    echo "✓ Added ~/.local/bin to PATH in $RC"
+  fi
+done
+
+echo
+echo "Done. Open a new terminal (or run: source ~/.zshrc), then run: meetre"

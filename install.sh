@@ -153,7 +153,7 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) : ;;  # already on PATH
   *)
     RC="$HOME/.zshrc"; [ "${SHELL##*/}" = "bash" ] && RC="$HOME/.bashrc"
-    if ! grep -qs '.local/bin' "$RC" 2>/dev/null; then
+    if ! grep -qsF 'export PATH="$HOME/.local/bin:$PATH"' "$RC" 2>/dev/null; then
       printf '\n# meetre\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$RC"
       info "Added ~/.local/bin to PATH in $RC (open a new terminal to pick it up)."
     fi
