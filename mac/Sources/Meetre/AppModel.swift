@@ -176,6 +176,16 @@ final class AppModel {
             if chatStreaming != nil { chatStreaming = p["text"]?.string ?? chatStreaming }
         case "meeting.updated":
             if let s = try? p["summary"]?.decode(MeetingSummary.self) {
+                // Auto-titling renamed the file: replace the old entry instead
+                // of leaving a ghost that points at a file that's gone.
+                if let prev = p["previous_id"]?.string, prev != s.id {
+                    meetings.removeAll { $0.id == prev }
+                    if let checked = done.removeValue(forKey: prev) {
+                        done[s.id] = checked
+                        UserDefaults.standard.set(done.mapValues { Array($0) }, forKey: "doneTasks")
+                    }
+                    if selectedID == prev { selectedID = s.id }
+                }
                 upsert(s)
                 if selectedID == s.id || selectedID == nil { selectedID = s.id; loadSelected() }
             } else {

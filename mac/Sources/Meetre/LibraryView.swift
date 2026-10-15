@@ -38,6 +38,7 @@ struct LibraryView: View {
 
 private struct Sidebar: View {
     @Environment(AppModel.self) private var model
+    @State private var pendingDelete: MeetingSummary?
 
     var body: some View {
         @Bindable var model = model
@@ -55,13 +56,22 @@ private struct Sidebar: View {
                                 Button("Reveal in Finder") { model.reveal(m.id) }
                                 Button("Open in Notes") { model.openNote(m.id) }
                                 Divider()
-                                Button("Move to Trash", role: .destructive) { model.delete(m.id) }
+                                // Destructive: always confirm (DESIGN.md §9 Errors).
+                                Button("Move to Trash…", role: .destructive) { pendingDelete = m }
                             }
                     }
                 }
             }
         }
         .listStyle(.sidebar)
+        .confirmationDialog("Move “\(pendingDelete?.title ?? "")” to the Trash?",
+                            isPresented: Binding(get: { pendingDelete != nil },
+                                                 set: { if !$0 { pendingDelete = nil } }),
+                            presenting: pendingDelete) { m in
+            Button("Move to Trash", role: .destructive) { model.delete(m.id) }
+        } message: { _ in
+            Text("You can restore it from the Trash in Finder.")
+        }
         .overlay {
             if model.meetings.isEmpty && !model.query.isEmpty {
                 ContentUnavailableView.search(text: model.query)

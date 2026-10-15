@@ -286,8 +286,11 @@ class _EngineHooks(Hooks):
 
     def published(self, out, stage):
         path = out["path"]
+        # Auto-titling renames the file (= the id) at the end: tell the app
+        # which id this replaces, or it keeps a ghost entry for the old name.
+        previous = self.meeting_id if self.meeting_id not in (None, path.stem) else None
         self.meeting_id = path.stem
-        self.e.event("meeting.updated", {"id": path.stem, "stage": stage,
+        self.e.event("meeting.updated", {"id": path.stem, "stage": stage, "previous_id": previous,
                                          "summary": meeting_summary(path)})
 
 
