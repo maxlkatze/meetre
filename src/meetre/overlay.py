@@ -176,12 +176,19 @@ class SummaryOverlay:
         root.setState_(1)           # always active
         root.setAppearance_(NSAppearance.appearanceNamed_("NSAppearanceNameVibrantDark"))
         root.setWantsLayer_(True)
-        layer = root.layer()
+        # The rounded clip + border live on a container, so the panel can be
+        # shrunk to a header strip (TranscriptOverlay minimize) by shifting the
+        # fixed-size root down instead of re-laying out every subview.
+        container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
+        container.setWantsLayer_(True)
+        layer = container.layer()
         layer.setCornerRadius_(14)
         layer.setMasksToBounds_(True)
         layer.setBorderWidth_(1.0)
         layer.setBorderColor_(_white(_FAINT).CGColor())
-        panel.setContentView_(root)
+        container.addSubview_(root)
+        panel.setContentView_(container)
+        self._root = root
 
         tint = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
         tint.setWantsLayer_(True)
@@ -357,6 +364,26 @@ class SummaryOverlay:
             _sans(9.5), _white(_MUTED), 0.2))
 
 
+MINI_H = 46  # minimized: header + scan rail only
+
+_target_cls = None
+
+
+def _button_target_class():
+    """NSObject subclass forwarding a button click to a Python callable
+    (defined lazily: PyObjC class names must be unique per process)."""
+    global _target_cls
+    if _target_cls is None:
+        from Foundation import NSObject
+
+        class MeetreHudButtonTarget(NSObject):
+            def clicked_(self, sender):
+                self.fn()
+
+        _target_cls = MeetreHudButtonTarget
+    return _target_cls
+
+
 class TranscriptOverlay(SummaryOverlay):
     """Live captions while recording: committed lines (speaker-labelled when
     both mic and system audio are captured) plus the in-flux tail, dimmed.
@@ -366,10 +393,98 @@ class TranscriptOverlay(SummaryOverlay):
     TITLE = "MEETRE  ·  LIVE TRANSCRIPT"
     HOLD = 1.5
 
-    def __init__(self):
+    def __init__(self, minimized: bool = False, on_minimize=None):
         super().__init__()
         self._lines: list = []
         self._tentative = ""
+        self._minimized = minimized
+        self._on_minimize = on_minimize  # callable(bool), e.g. persist to config
+        self._btn = None
+        self._hover = False
+
+    # -- minimize button --------------------------------------------------------
+    # The panel stays click-through everywhere except over this button: each
+    # tick checks the pointer and only accepts mouse events while it hovers it.
+
+    def _build(self) -> None:
+        super()._build()
+        from AppKit import NSButton, NSImage, NSMakeRect
+
+        top = H - 30
+        # Make room for the button right of the status label.
+        self._phase_lbl.setFrame_(NSMakeRect(W - 240, top, 200, 16))
+        btn = NSButton.alloc().initWithFrame_(NSMakeRect(W - 36, top - 3, 22, 22))
+        btn.setBordered_(False)
+        btn.setTitle_("")
+        btn.setImagePosition_(1)  # image only
+        target = _button_target_class().alloc().init()
+        target.fn = self.toggle_minimized
+        btn.setTarget_(target)
+        btn.setAction_("clicked:")
+        btn.setToolTip_("Minimize / expand live transcript")
+        self._root.addSubview_(btn)
+        self._btn, self._btn_target = btn, target
+        self._btn_image = lambda name: NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            name, "Minimize")
+        self._apply_minimized()
+
+    def toggle_minimized(self) -> None:
+        self._minimized = not self._minimized
+        self._apply_minimized()
+        if self._on_minimize is not None:
+            try:
+                self._on_minimize(self._minimized)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _apply_minimized(self) -> None:
+        from AppKit import NSMakeRect
+
+        if self._panel is None:
+            return
+        h = MINI_H if self._minimized else H
+        f = self._panel.frame()
+        top = f.origin.y + f.size.height  # keep the top edge pinned
+        self._root.setFrameOrigin_((0, h - H))
+        self._panel.setFrame_display_(NSMakeRect(f.origin.x, top - h, W, h), True)
+        img = self._btn_image("chevron.down" if self._minimized else "chevron.up")
+        if img is not None:
+            self._btn.setImage_(img)
+        else:
+            self._btn.setTitle_("+" if self._minimized else "–")
+        self._style_button()
+
+    def _style_button(self) -> None:
+        try:
+            self._btn.setContentTintColor_(_white(_TEXT if self._hover else _MUTED))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _track_mouse(self) -> None:
+        from AppKit import NSEvent, NSPointInRect
+
+        if self._btn is None or not self._shown:
+            return
+        rect = self._panel.convertRectToScreen_(
+            self._btn.convertRect_toView_(self._btn.bounds(), None))
+        # A little slack around the 22 pt button makes it easy to hit.
+        rect = ((rect.origin.x - 4, rect.origin.y - 4),
+                (rect.size.width + 8, rect.size.height + 8))
+        hover = bool(NSPointInRect(NSEvent.mouseLocation(), rect))
+        if hover != self._hover:
+            self._hover = hover
+            self._panel.setIgnoresMouseEvents_(not hover)
+            self._style_button()
+
+    def _tick(self) -> None:
+        super()._tick()
+        self._track_mouse()
+
+    def _hide(self) -> None:
+        super()._hide()
+        if self._panel is not None:
+            self._hover = False
+            self._panel.setIgnoresMouseEvents_(True)
 
     def begin(self, model: str = "") -> None:
         with self._lock:

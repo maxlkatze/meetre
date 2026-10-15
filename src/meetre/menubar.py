@@ -523,7 +523,9 @@ class MeetreApp(rumps.App if rumps else object):
         self._overlay_timer = rumps.Timer(self._overlay.tick, 1 / 15)
         self._overlay_timer.start()
         # Live captions HUD while recording (same corner, never at the same time).
-        self._live_overlay = TranscriptOverlay()
+        self._live_overlay = TranscriptOverlay(
+            minimized=self.cfg.live_transcript_minimized,
+            on_minimize=self._on_live_minimized)
         self._live_timer = rumps.Timer(self._live_overlay.tick, 1 / 15)
         self._live_timer.start()
         # By default the NSTimer only fires in the default run-loop mode, so the
@@ -781,6 +783,10 @@ class MeetreApp(rumps.App if rumps else object):
                 self._start_live()
             else:
                 self._stop_live()
+
+    def _on_live_minimized(self, minimized):
+        self.cfg.live_transcript_minimized = minimized
+        self.cfg.save()
 
     def _start_live(self):
         """Start live captions for the current recording (best-effort)."""
