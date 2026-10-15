@@ -80,6 +80,80 @@ def find_loopback_device() -> Optional[int]:
     return None
 
 
+class WavTail:
+    """Incrementally reads a WAV that another writer is still appending to.
+
+    Used for live captions while recording: the mic writer (libsndfile) and the
+    ScreenCaptureKit helper (AVAudioFile) both stream PCM to disk but only fix
+    up the RIFF sizes on close, so we parse the header ourselves and read from
+    the ``data`` chunk to the current end of file. :meth:`read` returns the new
+    audio as mono float32 at 16 kHz (empty until the header is on disk).
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._pos: Optional[int] = None  # byte offset of the next unread frame
+        self._fmt = None                 # (dtype, channels, samplerate, block_align)
+
+    def _parse_header(self, f) -> bool:
+        import struct
+
+        head = f.read(12)
+        if len(head) < 12 or head[:4] not in (b"RIFF", b"RF64") or head[8:12] != b"WAVE":
+            return False
+        fmt = None
+        while True:
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                return False
+            cid, size = hdr[:4], struct.unpack("<I", hdr[4:])[0]
+            if cid == b"data":
+                if fmt is None:
+                    return False
+                self._fmt, self._pos = fmt, f.tell()
+                return True
+            body = f.read(size + (size & 1))
+            if len(body) < size:
+                return False
+            if cid == b"fmt ":
+                code, ch, sr, _, align, bits = struct.unpack("<HHIIHH", body[:16])
+                if code == 0xFFFE and len(body) >= 26:  # WAVE_FORMAT_EXTENSIBLE
+                    code = struct.unpack("<H", body[24:26])[0]
+                dtype = {(1, 16): "<i2", (1, 32): "<i4", (3, 32): "<f4"}.get((code, bits))
+                if dtype is None:
+                    return False
+                fmt = (dtype, ch, sr, align)
+
+    def read(self) -> np.ndarray:
+        empty = np.zeros(0, dtype="float32")
+        if not self.path.exists():
+            return empty
+        with open(self.path, "rb") as f:
+            if self._pos is None and not self._parse_header(f):
+                return empty
+            dtype, ch, sr, align = self._fmt
+            f.seek(self._pos)
+            raw = f.read()
+        raw = raw[: len(raw) - len(raw) % align]  # only whole frames
+        if not raw:
+            return empty
+        self._pos += len(raw)
+        data = np.frombuffer(raw, dtype=dtype).astype("float32")
+        if dtype == "<i2":
+            data /= 32768.0
+        elif dtype == "<i4":
+            data /= 2147483648.0
+        if ch > 1:
+            data = data.reshape(-1, ch).mean(axis=1)
+        if sr != SAMPLE_RATE and len(data):
+            n = int(round(len(data) * SAMPLE_RATE / sr))
+            data = np.interp(
+                np.linspace(0, len(data), n, endpoint=False),
+                np.arange(len(data)), data,
+            ).astype("float32")
+        return data
+
+
 class _Source:
     """Streams one input device to a temporary WAV at its native rate."""
 
@@ -276,6 +350,10 @@ class Recorder:
         self._sources = started
         if not self._sources:
             raise RuntimeError("No audio source could be started")
+
+    def live_paths(self) -> dict:
+        """{role: path} of the WAVs being written right now (for live captions)."""
+        return {getattr(s, "role", "source"): s.path for s in self._sources}
 
     def stop(self) -> Path:
         for src in self._sources:

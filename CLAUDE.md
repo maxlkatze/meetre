@@ -50,8 +50,12 @@ audio or text leaves the machine.
 - `downloads.py` — HF model download with progress. `icon.py` — status-bar icon.
 - `autostart.py` — launchd "start at login". `bundle.py` — `.app` wrapper.
 - `updater.py` — self-update via `git pull`. `crashlog.py` — crash logging.
-- `overlay.py` — live summary HUD (click-through, top-right) fed by
-  `summarize(on_progress=…)`; toggled by `summary_overlay`.
+- `overlay.py` — click-through top-right HUDs: `SummaryOverlay` (fed by
+  `summarize(on_progress=…)`, toggled by `summary_overlay`) and
+  `TranscriptOverlay` (live captions while recording, `live_transcript`).
+- `live.py` — `LiveTranscriber`: tails the recorder's WAVs (`recorder.WavTail`)
+  and re-decodes the uncommitted window via `transcriber.transcribe_live`
+  (MLX thread); mic-vs-system energy labels speakers. Preview only.
 - `ui.py` — Rich CLI tables/panels. `__init__.py` — silences dep log noise.
 
 ## Notes / gotchas

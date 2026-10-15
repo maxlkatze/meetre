@@ -21,8 +21,11 @@ def is_enabled() -> bool:
 
 
 def _plist_xml() -> str:
-    # Run the menu-bar app with the same interpreter that installed it.
-    python = sys.executable
+    # Always the venv interpreter — sys.executable may be the meetre.app
+    # bundle symlink, which can't import meetre without our PYTHONPATH.
+    from .bundle import _venv_python
+
+    python = str(_venv_python())
     # Include common dirs + a bundled local git on PATH for auto-update.
     root = Path(__file__).resolve().parents[2]
     path = (f"{Path(python).parent}:{root}/.runtime/conda/bin:{root}/.runtime/git/bin:"
@@ -61,6 +64,12 @@ def enable() -> None:
                    capture_output=True, text=True)
     subprocess.run(["launchctl", "load", str(PLIST_PATH)],
                    capture_output=True, text=True)
+
+
+def repair() -> None:
+    """Rewrite a stale/broken login item in place (picked up at next login)."""
+    if is_enabled() and PLIST_PATH.read_text() != _plist_xml():
+        PLIST_PATH.write_text(_plist_xml())
 
 
 def disable() -> None:

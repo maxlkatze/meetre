@@ -481,6 +481,7 @@ class MeetreApp(rumps.App if rumps else object):
         self.cfg = Config.load()
         self.state = "idle"          # idle | recording | processing
         self._recorder = None
+        self._live = None            # LiveTranscriber while recording
         self._rec_meta = None        # (title, started, tmp_wav)
         self._auto_title = False     # derive title from summary when no name given
         self._settings_ctrl = None   # keep the settings window alive
@@ -516,11 +517,15 @@ class MeetreApp(rumps.App if rumps else object):
         self._timer = rumps.Timer(self._tick, 0.5)
         self._timer.start()
         # Live summary HUD; its own faster timer animates/streams the text.
-        from .overlay import SummaryOverlay
+        from .overlay import SummaryOverlay, TranscriptOverlay
 
         self._overlay = SummaryOverlay()
         self._overlay_timer = rumps.Timer(self._overlay.tick, 1 / 15)
         self._overlay_timer.start()
+        # Live captions HUD while recording (same corner, never at the same time).
+        self._live_overlay = TranscriptOverlay()
+        self._live_timer = rumps.Timer(self._live_overlay.tick, 1 / 15)
+        self._live_timer.start()
         # By default the NSTimer only fires in the default run-loop mode, so the
         # moment the user opens the menu the loop switches to event-tracking mode
         # and the title/spinner freeze and queued notifications stall until the
@@ -529,7 +534,7 @@ class MeetreApp(rumps.App if rumps else object):
         try:
             from Foundation import NSRunLoop, NSRunLoopCommonModes
 
-            for t in (self._timer, self._overlay_timer):
+            for t in (self._timer, self._overlay_timer, self._live_timer):
                 nstimer = getattr(t, "_nstimer", None)
                 if nstimer is not None:
                     NSRunLoop.currentRunLoop().addTimer_forMode_(nstimer, NSRunLoopCommonModes)
@@ -634,6 +639,9 @@ class MeetreApp(rumps.App if rumps else object):
         self.overlay_item = rumps.MenuItem("Live summary overlay",
                                            callback=self.on_toggle_overlay)
         self.overlay_item.state = 1 if self.cfg.summary_overlay else 0
+        self.live_item = rumps.MenuItem("Live transcript overlay",
+                                        callback=self.on_toggle_live)
+        self.live_item.state = 1 if self.cfg.live_transcript else 0
         self.names_item = rumps.MenuItem("Name speakers from conversation",
                                          callback=self.on_toggle_names)
         self.names_item.state = 1 if self.cfg.name_speakers else 0
@@ -652,7 +660,6 @@ class MeetreApp(rumps.App if rumps else object):
         about_menu.add(tagline)
         about_menu.add(None)
         about_menu.add(rumps.MenuItem("Check for updates", callback=self.on_update))
-        about_menu.add(rumps.MenuItem("Restart meetre", callback=self.on_restart))
         self.startup_item = rumps.MenuItem("Start at login", callback=self.on_toggle_startup)
         self.startup_item.state = 1 if autostart.is_enabled() else 0
         about_menu.add(self.startup_item)
@@ -679,6 +686,7 @@ class MeetreApp(rumps.App if rumps else object):
             self.sysaudio_item,
             self.persons_item,
             self.calls_item,
+            self.live_item,
             self.overlay_item,
             self.names_item,
             None,
@@ -688,6 +696,7 @@ class MeetreApp(rumps.App if rumps else object):
             rumps.MenuItem("Summarize last → Apple Notes (local)", callback=self.on_summarize),
             rumps.MenuItem("Open last transcript", callback=self.on_open_last),
             rumps.MenuItem("Open transcripts folder", callback=self.on_open_folder),
+            rumps.MenuItem("↻ Restart meetre", callback=self.on_restart),
             downloads_menu,
             None,
             about_menu,
@@ -761,6 +770,41 @@ class MeetreApp(rumps.App if rumps else object):
         self.cfg.summary_overlay = not self.cfg.summary_overlay
         self.cfg.save()
         sender.state = 1 if self.cfg.summary_overlay else 0
+
+    def on_toggle_live(self, sender):
+        self.cfg.live_transcript = not self.cfg.live_transcript
+        self.cfg.save()
+        sender.state = 1 if self.cfg.live_transcript else 0
+        # Apply to a recording in progress right away.
+        if self.state == "recording":
+            if self.cfg.live_transcript:
+                self._start_live()
+            else:
+                self._stop_live()
+
+    def _start_live(self):
+        """Start live captions for the current recording (best-effort)."""
+        from . import transcriber
+        from .live import LiveTranscriber
+
+        if self._live is not None or self._recorder is None:
+            return
+        if not transcriber.live_supported(self.cfg.model):
+            return
+        lbl = transcriber._labels(self.cfg.language)
+        labels = {"mic": (self.cfg.my_name or "").strip() or lbl["local"],
+                  "system": lbl["remote"]}
+        self._live_overlay.begin(self.cfg.model)
+        self._live = LiveTranscriber(self._recorder.live_paths(), self.cfg.model,
+                                     self.cfg.language, self._live_overlay.feed_lines,
+                                     labels)
+        self._live.start()
+
+    def _stop_live(self):
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+        self._live_overlay.finish()
 
     def on_toggle_names(self, sender):
         self.cfg.name_speakers = not self.cfg.name_speakers
@@ -986,10 +1030,20 @@ class MeetreApp(rumps.App if rumps else object):
         self.stop_item.set_callback(self.on_stop)
         self.rec_item.set_callback(None)
         self.rec_prev_item.set_callback(None)
+        if self.cfg.live_transcript:
+            try:
+                self._start_live()
+            except Exception:  # noqa: BLE001 — captions are optional
+                import sys
+
+                from . import crashlog
+
+                crashlog._write_exception("Live transcript failed to start", *sys.exc_info())
 
     def on_stop(self, sender=None):
         if self.state != "recording" or self._recorder is None:
             return
+        self._stop_live()
         self.state = "processing"
         self.stop_item.set_callback(None)
         # Finalise + transcribe off the main thread so the UI stays responsive.
@@ -1438,36 +1492,26 @@ class MeetreApp(rumps.App if rumps else object):
                 return
         import os
         import subprocess
-        import sys
 
-        from . import autostart, bundle
+        from . import autostart, instances
 
-        # Preferred path: when meetre is a login item, let launchd restart the
-        # managed job. This reproduces the exact, known-good login launch and
-        # avoids os.execve() from inside the live AppKit run loop (which crashed:
-        # re-exec'ing while the bundle symlink we launch through is being rebuilt
-        # left the app unable to come back). launchd SIGKILLs us and relaunches.
-        if autostart.is_enabled():
-            uid = os.getuid()
+        # Running as the login item: let launchd kill + relaunch the managed
+        # job (the exact, known-good login launch).
+        if instances.is_launchd_job():
             try:
                 r = subprocess.run(
-                    ["launchctl", "kickstart", "-k", f"gui/{uid}/{autostart.LABEL}"],
+                    ["/bin/launchctl", "kickstart", "-k",
+                     f"gui/{os.getuid()}/{autostart.LABEL}"],
                     capture_output=True, text=True,
                 )
                 if r.returncode == 0:
                     return  # launchd is killing + relaunching us now
             except Exception:  # noqa: BLE001
-                pass  # fall through to the manual relaunch below
-
-        # Fallback (dev run, or not registered as a login item): spawn a fresh
-        # detached instance, then quit this one. Launch via "python -m
-        # meetre.menubar" (bundle exe when available) — never re-run menubar.py as
-        # a script, which dies on its package-relative imports.
-        args = bundle.launch_args() or [sys.executable, "-m", "meetre.menubar"]
+                pass  # fall through to the watcher below
+        # Otherwise a detached watcher starts the new instance only once this
+        # process has fully exited (no two instances racing for the menu bar).
         try:
-            env = dict(os.environ)
-            env["PYTHONPATH"] = bundle._pythonpath()
-            subprocess.Popen(args, env=env, start_new_session=True)
+            instances.relaunch_after_exit(os.getpid())
         except Exception as e:  # noqa: BLE001
             rumps.alert("Could not restart", str(e))
             return
@@ -1645,6 +1689,30 @@ class MeetreApp(rumps.App if rumps else object):
             self._set_status("✦ Ready")
 
 
+def _replace_running_instances() -> None:
+    """If meetre is already running, ask whether to replace it or keep it."""
+    from . import instances
+
+    pids = instances.others()
+    if not pids:
+        return
+    from AppKit import NSApplication
+
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(1)  # Accessory: no Dock icon for the prompt
+    app.activateIgnoringOtherApps_(True)
+    choice = rumps.alert(
+        title="meetre is already running",
+        message=(f"Another meetre instance is running (PID {', '.join(map(str, pids))}).\n\n"
+                 "Replace it with this one? A recording in progress there "
+                 "would be lost."),
+        ok="Replace", cancel="Keep the running one",
+    )
+    if choice != 1:
+        raise SystemExit(0)
+    instances.terminate(pids)
+
+
 def run():
     _require_rumps()
     # Re-exec from inside meetre.app so notifications/app switcher show "meetre"
@@ -1655,6 +1723,20 @@ def run():
         from . import bundle
 
         bundle.relaunch_into_bundle()
+    except Exception:  # noqa: BLE001
+        pass
+    # Another instance already in the menu bar? Ask to replace it.
+    try:
+        _replace_running_instances()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        pass
+    # Keep the login item pointing at a working interpreter.
+    try:
+        from . import autostart
+
+        autostart.repair()
     except Exception:  # noqa: BLE001
         pass
     # Capture native segfaults and uncaught exceptions to <repo>/crashlogs/.

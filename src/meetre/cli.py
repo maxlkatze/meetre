@@ -829,6 +829,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("menubar", help="Launch the macOS menu-bar app (default)")
     sub.add_parser("cli", help="Start the interactive text menu")
+    sub.add_parser("restart", help="Restart the menu-bar app (replaces running instances)")
     sub.add_parser("update", help="Update meetre to the latest version (git pull)")
     sub.add_parser("list", help="List saved transcripts")
     sub.add_parser("open", help="Open the transcripts folder in Finder")
@@ -875,6 +876,11 @@ def main(argv: Optional[list] = None) -> int:
             do_local_summarize(cfg, args.file)
         elif args.command == "menubar":
             do_menubar(cfg)
+        elif args.command == "restart":
+            from . import instances
+
+            instances.restart_from_outside()
+            ui.ok("meetre restarted (✦ top-right).")
         elif args.command == "update":
             do_update(cfg)
         elif args.command == "list":

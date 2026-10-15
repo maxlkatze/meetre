@@ -236,6 +236,52 @@ def _transcribe_mlx(audio_path, model, language, progress) -> List[Segment]:
     return out
 
 
+def live_supported(model: Optional[str]) -> bool:
+    """Live (while-recording) transcription needs an MLX backend."""
+    return is_parakeet(model) or available_backend() == "mlx-whisper"
+
+
+@on_mlx_thread
+def transcribe_live(audio, model: str, language: Optional[str] = None,
+                    prompt: Optional[str] = None) -> List[Segment]:
+    """Transcribe a short in-memory 16 kHz mono window (live captions).
+
+    Tuned for latency: greedy decoding only (no temperature fallback), no
+    conditioning across windows — ``prompt`` (the recent committed text) gives
+    continuity instead. Timestamps are relative to the window start.
+    """
+    import numpy as np
+
+    audio = np.ascontiguousarray(audio, dtype="float32")
+    if NORMALIZE_FOR_ASR:
+        audio = normalize_for_asr(audio, 16_000)
+    if is_parakeet(model):
+        import tempfile
+
+        import soundfile as sf
+
+        pk = load_parakeet(PARAKEET_MODELS.get(model, model))
+        with tempfile.NamedTemporaryFile(suffix="_meetre_live.wav") as tmp:
+            sf.write(tmp.name, audio, 16_000, subtype="FLOAT")
+            result = pk.transcribe(tmp.name)
+        return [Segment(start=float(s.start), end=float(s.end), text=s.text.strip())
+                for s in result.sentences if s.text.strip()]
+
+    import mlx_whisper
+
+    result = mlx_whisper.transcribe(
+        audio,
+        path_or_hf_repo=MLX_REPOS.get(model, MLX_REPOS["base"]),
+        language=language,
+        initial_prompt=prompt or _initial_prompt(language),
+        condition_on_previous_text=False,
+        temperature=0.0,
+        word_timestamps=False,
+    )
+    return [Segment(start=s["start"], end=s["end"], text=s["text"].strip())
+            for s in result.get("segments", []) if s["text"].strip()]
+
+
 def _parakeet_load_audio(filename, sampling_rate, dtype=None):
     """Replacement for parakeet-mlx's ffmpeg-only loader: read via soundfile and
     resample to the model's rate, returning a normalised mono mx float32 array."""

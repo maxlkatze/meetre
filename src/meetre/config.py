@@ -88,6 +88,10 @@ class Config:
     # Menu-bar app: stream the summary into a translucent, click-through
     # overlay in the top-right corner while it is being written.
     summary_overlay: bool = True
+    # Menu-bar app: live captions of the conversation in a click-through
+    # overlay in the top-right corner while recording (preview only — the
+    # saved transcript comes from the full pass after recording).
+    live_transcript: bool = True
     # After speaker detection, let the local LLM read the transcript for
     # explicit name evidence ("Thanks, Anna …") and replace "Speaker 2" with
     # the real name. Names are verified against the transcript before use.

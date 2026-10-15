@@ -1,4 +1,8 @@
-"""Live summary overlay: a translucent, click-through HUD in the top-right corner.
+"""Live overlays: translucent, click-through HUDs in the top-right corner.
+
+:class:`TranscriptOverlay` shows live captions while recording;
+:class:`SummaryOverlay` streams the summary afterwards (same window, so the
+two never compete for the corner).
 
 While the local LLM writes the summary, its output streams into a small
 borderless panel (graphite, grayscale type). The panel ignores
@@ -54,6 +58,9 @@ def _sans(size, weight=0.0):
 
 
 class SummaryOverlay:
+    TITLE = "MEETRE  ·  LIVE SUMMARY"
+    HOLD = HOLD_AFTER_DONE
+
     def __init__(self):
         self._lock = threading.Lock()
         self._state = None       # None | "active" | "done"
@@ -97,7 +104,7 @@ class SummaryOverlay:
                 self._text = text
             self._phase = "done"
             self._state = "done"
-            self._done_at = time.monotonic() - (HOLD_AFTER_DONE if not self._text.strip() else 0)
+            self._done_at = time.monotonic() - (self.HOLD if not self._text.strip() else 0)
             self._dirty = True
 
     # -- main thread --------------------------------------------------------
@@ -116,7 +123,7 @@ class SummaryOverlay:
 
         if state is None:
             return
-        if state == "done" and time.monotonic() - done_at > HOLD_AFTER_DONE:
+        if state == "done" and time.monotonic() - done_at > self.HOLD:
             self._hide()
             with self._lock:
                 if self._state == "done":
@@ -192,7 +199,7 @@ class SummaryOverlay:
 
         top = H - 30
         self._title = label(NSMakeRect(16, top, 260, 16), _sans(10, 0.4), _white(_SUBTLE))
-        self._title.setAttributedStringValue_(self._kerned("MEETRE  ·  LIVE SUMMARY",
+        self._title.setAttributedStringValue_(self._kerned(self.TITLE,
                                                            _sans(10, 0.4), _white(_SUBTLE), 1.2))
         self._phase_lbl = label(NSMakeRect(W - 216, top, 200, 16), _sans(10, 0.4),
                                 _white(_MUTED), align=2)  # right
@@ -347,4 +354,111 @@ class SummaryOverlay:
         size = f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
         self._footer.setAttributedStringValue_(self._kerned(
             f"{secs:.0f}s  ·  {size} chars  ·  {model}  ·  on-device",
+            _sans(9.5), _white(_MUTED), 0.2))
+
+
+class TranscriptOverlay(SummaryOverlay):
+    """Live captions while recording: committed lines (speaker-labelled when
+    both mic and system audio are captured) plus the in-flux tail, dimmed.
+    Always pinned to the newest text. Fed by :class:`meetre.live.LiveTranscriber`.
+    """
+
+    TITLE = "MEETRE  ·  LIVE TRANSCRIPT"
+    HOLD = 1.5
+
+    def __init__(self):
+        super().__init__()
+        self._lines: list = []
+        self._tentative = ""
+
+    def begin(self, model: str = "") -> None:
+        with self._lock:
+            self._lines, self._tentative = [], ""
+        super().begin(model)
+        self.feed_lines([], "", "starting")
+
+    def feed_lines(self, lines, tentative: str, status: str) -> None:
+        with self._lock:
+            if self._state != "active":
+                return
+            self._lines, self._tentative, self._phase = list(lines), tentative, status
+            self._dirty = True
+
+    def finish(self, text: Optional[str] = None) -> None:
+        """Recording stopped: show "stopped" briefly, then fade out."""
+        with self._lock:
+            if self._state != "active":
+                return
+            self._phase, self._state = "done", "done"
+            self._done_at = time.monotonic()
+            self._dirty = True
+
+    def _animate(self, phase: str) -> None:
+        # The comet sweeps while a model is loading/downloading.
+        if phase == "listening":
+            self._comet.setHidden_(True)
+        else:
+            super()._animate(phase)
+
+    def _render(self, phase, text, stage, started, model) -> None:
+        from AppKit import (
+            NSFontAttributeName, NSForegroundColorAttributeName, NSKernAttributeName,
+            NSMutableAttributedString, NSMutableParagraphStyle,
+            NSParagraphStyleAttributeName,
+        )
+
+        with self._lock:
+            lines, tentative = list(self._lines), self._tentative
+
+        blink = (self._frame // 8) % 2 == 0
+        dot = "●" if blink else "○"
+        if phase == "done":
+            tag, col = "■ STOPPED", _MUTED
+        elif phase == "listening":
+            tag, col = f"{dot} LIVE", _SUBTLE
+        else:
+            tag, col = f"{dot} {phase.upper()}", _MUTED
+        self._phase_lbl.setAttributedStringValue_(
+            self._kerned(tag, _sans(10, 0.4), _white(col), 1.2, align=2))
+
+        out = NSMutableAttributedString.alloc().init()
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setLineSpacing_(2.5)
+        para.setParagraphSpacing_(6)
+
+        def add(s, font, color, kern=0.0):
+            out.appendAttributedString_(type(out).alloc().initWithString_attributes_(
+                s, {NSFontAttributeName: font, NSForegroundColorAttributeName: color,
+                    NSParagraphStyleAttributeName: para, NSKernAttributeName: kern}))
+
+        # Only the tail is rendered; walk back until MAX_CHARS is filled.
+        shown, budget = [], MAX_CHARS - len(tentative)
+        for who, said in reversed(lines):
+            if budget <= 0:
+                break
+            shown.append((who, said[-budget:]))
+            budget -= len(said)
+        shown.reverse()
+
+        for i, (who, said) in enumerate(shown):
+            if i:
+                add("\n", _sans(12.5), _white(_TEXT))
+            if who:
+                add(who.upper() + "  ", _sans(9.5, 0.5), _white(_MUTED), 1.0)
+            add(said, _sans(12.5), _white(_TEXT))
+        if tentative:
+            add(("  " if shown else "") + tentative, _sans(12.5), _white(_SUBTLE))
+        if not shown and not tentative:
+            add("Listening…" if phase in ("listening", "done") else "Preparing live captions…",
+                _sans(11), _white(_MUTED))
+        if phase == "listening" and blink:
+            add("▍", _sans(12.5), _white(_SUBTLE))
+
+        self._tv.textStorage().setAttributedString_(out)
+        self._tv.scrollRangeToVisible_((out.length(), 0))
+
+        m, s = divmod(int(time.monotonic() - started), 60)
+        words = sum(len(t.split()) for _, t in lines)
+        self._footer.setAttributedStringValue_(self._kerned(
+            f"{m:02d}:{s:02d}  ·  {words} words  ·  {model}  ·  on-device",
             _sans(9.5), _white(_MUTED), 0.2))

@@ -76,6 +76,27 @@ def check(since: Optional[str] = None) -> dict:
     return {"available": behind > 0, "behind": behind, "error": None}
 
 
+def venv_python(root: Path) -> str:
+    """The venv interpreter. Never ``sys.executable``: inside meetre.app that is
+    the bundle symlink, which runs as the *base* runtime python (it can't see
+    the venv's pyvenv.cfg) — pip there uninstalls meetre from the venv (taking
+    .venv/bin/meetre and the login item's import with it) and installs it into
+    .runtime/python instead."""
+    for name in ("python3.12", "python3", "python"):
+        cand = root / ".venv" / "bin" / name
+        if cand.exists():
+            return str(cand)
+    return sys.executable
+
+
+def reinstall_editable(root: Path) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    return subprocess.run(
+        [venv_python(root), "-m", "pip", "install", "-q", "-e", f"{root}[menubar]"],
+        capture_output=True, text=True, env=env,
+    )
+
+
 def has_remote() -> bool:
     git, root = _git(), repo_root()
     if not git or not root:
@@ -104,9 +125,10 @@ def update(reinstall: bool = True) -> dict:
     after = _run(git, root, "rev-parse", "HEAD").stdout.strip()
 
     updated = before != after
-    if updated and reinstall:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", str(root)],
-            capture_output=True, text=True,
-        )
+    # meetre is an editable install, so new code is live after the pull; only
+    # dependency / entry-point changes need pip.
+    changed = _run(git, root, "diff", "--name-only", before, after).stdout.split()
+    if updated and reinstall and any(f in ("pyproject.toml", "setup.py", "setup.cfg")
+                                     for f in changed):
+        reinstall_editable(root)
     return {"updated": updated, "before": before, "after": after, "error": None}
