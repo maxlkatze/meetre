@@ -24,7 +24,8 @@ from typing import Callable, List, Optional
 import numpy as np
 
 SR = 16_000
-STEP = 1.5             # seconds between passes (after the previous one finishes)
+STEP = 1.5             # max seconds between passes (after the previous one finishes)
+MIN_STEP = 0.5         # fast models (Parakeet) re-decode this often
 MIN_WINDOW = 1.0       # don't decode less than this
 COMMIT_AFTER = 10.0    # once the window is this long, commit all but the last segment
 MAX_WINDOW = 25.0      # hard cap: commit everything
@@ -79,7 +80,8 @@ class LiveTranscriber:
             self._emit(status=f"unavailable: {e}")
             return
         self._emit()
-        while not self._stop.wait(STEP):
+        self._step = STEP
+        while not self._stop.wait(self._step):
             try:
                 self._pass()
             except Exception:  # noqa: BLE001 — a bad pass must not end captions
@@ -107,9 +109,19 @@ class LiveTranscriber:
                 self._bufs[role] = np.concatenate([self._bufs[role], new])
 
     def _window(self) -> np.ndarray:
+        """The pending audio as ONE combined stream: system audio plus the
+        mic with the speakers' echo of the call removed (otherwise every
+        remote sentence is in the mix twice, offset — which garbles it)."""
+        from .attribution import suppress_echo
+
+        mic, system = self._bufs.get("mic"), self._bufs.get("system")
+        self._mic_clean = mic
+        if mic is not None and system is not None and len(mic) and len(system):
+            self._mic_clean = suppress_echo(mic, system)
         n = max(len(b) for b in self._bufs.values())
         mix = np.zeros(n, dtype="float32")
-        for b in self._bufs.values():
+        for role, b in self._bufs.items():
+            b = self._mic_clean if role == "mic" and self._mic_clean is not None else b
             mix[: len(b)] += b
         return mix
 
@@ -123,7 +135,9 @@ class LiveTranscriber:
         if len(self._bufs) < 2:
             return None
         a, b = int(start * SR), max(int(end * SR), int(start * SR) + 1)
-        mic = _rms(self._bufs.get("mic", np.zeros(0))[a:b])
+        # Echo-free mic: the call's voice through the speakers isn't "me".
+        mic_buf = getattr(self, "_mic_clean", None)
+        mic = _rms((mic_buf if mic_buf is not None else self._bufs.get("mic", np.zeros(0)))[a:b])
         sys_ = _rms(self._bufs.get("system", np.zeros(0))[a:b])
         return self._labels["system"] if sys_ > 0.3 * mic else self._labels["mic"]
 
@@ -177,4 +191,7 @@ class LiveTranscriber:
             segs = segs[-1:]
         self._emit(" ".join(s.text for s in segs))
         # Slow machine / big model: back off so passes don't queue up.
-        self._stop.wait(max(0.0, (time.monotonic() - t0) - STEP))
+        # Re-decode as often as the model allows: about twice the time a pass
+        # takes (fast models update near-instantly), never more than STEP.
+        took = time.monotonic() - t0
+        self._step = min(STEP, max(MIN_STEP, 2 * took))

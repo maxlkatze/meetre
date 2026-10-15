@@ -204,3 +204,63 @@ def split_by_turns(segments, turns):
             if w is not None:
                 run.append(w)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Echo suppression for the mixed signal (live captions)
+# ---------------------------------------------------------------------------
+
+ECHO_LAG = 0.24        # seconds of speaker→mic delay the echo may trail by
+ECHO_ATTENUATION = 0.03
+
+
+def suppress_echo(mic: np.ndarray, system: np.ndarray) -> np.ndarray:
+    """``mic`` with the call's speaker echo muted, for mixing with ``system``.
+
+    Without headphones the mic re-records the call from the speakers a moment
+    later; summing both stems then doubles every remote sentence with an
+    offset, which speech recognition handles badly. Frames where the mic
+    carries nothing but that echo are muted; frames where you speak — also
+    over the other side — rise above the estimated echo and are kept. Same
+    frame-power echo model as :func:`side_activity`, with the echo allowed to
+    trail the system audio by up to ``ECHO_LAG``.
+    """
+    hop = int(SR * FRAME)
+    n = min(len(mic), len(system)) // hop
+    if n < 30:
+        return mic
+    m = _frame_power(mic, n)
+    s = _frame_power(system, n)
+    fm, fs = _floor(m), _floor(s)
+    s_active = 10 * np.log10(s / fs) > ACTIVE_DB + 6
+    if s_active.sum() < 25:
+        return mic  # the call hardly spoke: nothing to learn the echo from
+    # Speaker→mic delay: the lag at which the mic's loudness envelope best
+    # follows the system's (frames, 0…ECHO_LAG).
+    env_m, env_s = np.sqrt(m), np.sqrt(s)
+    max_lag = max(1, int(ECHO_LAG / FRAME))
+    best, delay = -np.inf, 0
+    for d in range(0, max_lag + 1):
+        a_, b_ = env_m[d:], env_s[: n - d]
+        if a_.std() == 0 or b_.std() == 0:
+            continue
+        c = float(np.corrcoef(a_, b_)[0, 1])
+        if c > best:
+            best, delay = c, d
+    s_al = np.concatenate([np.full(delay, s[0]), s[: n - delay]])  # system, delayed
+    active = np.concatenate([np.zeros(delay, bool), s_active[: n - delay]])
+    # Echo gain from frames where only the call talks; frames where you talk
+    # over it sit higher, so a low percentile ignores them.
+    gain = float(np.percentile(m[active] / s_al[active], 30))
+    residual = np.maximum(m - 2.0 * gain * s_al, fm)  # 2×: margin for echo jitter
+    local = 10 * np.log10(residual / fm) > ACTIVE_DB
+    echo_only = active & ~local
+    g = np.where(echo_only, ECHO_ATTENUATION, 1.0)
+    # Never chop words: frames next to your own speech stay open; then smooth
+    # the gain so muting fades instead of clicking.
+    keep = np.convolve(local.astype(float), np.ones(5), mode="same") > 0
+    g[keep] = 1.0
+    g = np.convolve(g, np.ones(3) / 3, mode="same")
+    out = mic.astype("float32").copy()
+    out[: n * hop] *= np.repeat(g, hop).astype("float32")
+    return out
