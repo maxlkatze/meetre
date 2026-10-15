@@ -81,3 +81,10 @@ audio or text leaves the machine.
   `downloads.ensure_model` and `load(..., revision=)`). Re-review that file before
   bumping the pin. K2 always reasons (`<ifm|think…>` tags); use
   `reasoning_effort="low"` — "medium" overran the think budget for identical text.
+- **Summary prompt is tuned for K2** (benchmarked on real 1–31 min meetings).
+  Default prompt goes *after* the transcript (compacted to one `Speaker: text`
+  line per turn by `compact_transcript`); custom prompts keep instruction-first.
+  Generation uses a mild repetition penalty (1.05 / 256 tokens) plus a
+  line-loop guard (`_looping`, `_dedupe_lines`): greedy K2 otherwise looped one
+  bullet to the token cap on long meetings (141 s → ~14 s). Temperature
+  sampling dropped whole sections — don't switch to it without re-measuring.

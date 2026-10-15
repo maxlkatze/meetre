@@ -264,118 +264,150 @@ def human_size(num_bytes: float) -> str:
 _CHUNK_CHARS = 24_000
 
 _SYSTEM = {
-    "de": "Du bist ein professioneller Protokollant. Du fasst Meetings sachlich "
-          "und strukturiert auf Deutsch zusammen, überwiegend als Stichpunkte. "
-          "Erfinde nichts — verwende nur, was im Transkript steht.",
-    "en": "You are a professional meeting note-taker. You summarize meetings "
-          "factually and in a structured way, mostly as bullet points. Do not "
-          "invent anything — use only what is in the transcript.",
+    "de": "Du bist ein erfahrener Protokollant. Du fasst Meetings sachlich, "
+          "konkret und knapp auf Deutsch zusammen. Du verwendest nur, was im "
+          "Transkript steht.",
+    "en": "You are an experienced meeting note-taker. You summarize meetings "
+          "factually, concretely and concisely. You use only what is in the "
+          "transcript.",
 }
 
-# The default, user-editable instruction (no transcript — that's appended).
+# The default, user-editable instruction. Tuned on K2 Horizon 7B (reasoning
+# "low") against real meetings: it comes AFTER the transcript (see
+# summarize()) — the old instruction-first layout plus a trailing reminder let
+# K2 fall into repetition loops on 30-min meetings (141 s, 18k chars of one
+# repeated bullet vs. 12 s now). Each section has one job (the summary gives
+# context, not the decisions again), "- Keine" only for empty sections, and
+# nonsense from speech recognition is dropped rather than copied.
 _DEFAULT_INSTRUCTION = {
-    "de": "Fasse das Meeting für jemanden zusammen, der nicht dabei war. Er soll "
-          "danach wissen, WAS konkret gesagt, entschieden und vereinbart wurde — "
-          "nicht nur, DASS über etwas gesprochen wurde.\n\n"
-          "INHALT\n"
-          "- Verdichte, statt nachzuerzählen: Die Zusammenfassung ist deutlich "
-          "kürzer als das Transkript. Ein kurzes Gespräch ergibt 2–4 Stichpunkte.\n"
-          "- Sei konkret: Nenne Probleme, Argumente, Zahlen, Beträge, Namen von "
-          "Personen/Projekten/Tools, Termine und Fristen so, wie sie fallen.\n"
-          "- Jeder Stichpunkt bringt eine neue Information. Nichts doppelt — "
-          "weder innerhalb eines Abschnitts noch über Abschnitte hinweg.\n"
-          "- Keine leeren Meta-Sätze („Diskussion über …“, „Austausch zu …“, "
-          "„Erwähnung von …“). Schreibe den Inhalt selbst.\n"
+    "de": "Fasse das Meeting oben für jemanden zusammen, der nicht dabei war. "
+          "Danach soll er wissen, WAS konkret gesagt, entschieden und vereinbart "
+          "wurde — nicht nur, DASS über etwas gesprochen wurde.\n\n"
+          "REGELN\n"
+          "- Verdichten statt nacherzählen: ein kurzes Gespräch ergibt nur wenige "
+          "Stichpunkte, ein langes Meeting entsprechend mehr.\n"
+          "- Konkret: Probleme, Argumente, Zahlen, Werte, Namen von "
+          "Projekten/Tools, Termine und Fristen so, wie sie fallen. Keine leeren "
+          "Meta-Sätze („Das Team diskutierte …“, „Austausch zu …“).\n"
           "  Schlecht: „Diskussion über Designs und Konsistenz.“\n"
-          "  Gut: „Zu viele parallele Designvarianten und keine verbindlichen "
-          "Figma-Vorlagen — Inhalte lassen sich nicht konsistent einbauen.“\n\n"
-          "TRANSKRIPTIONSFEHLER\n"
-          "- Das Transkript stammt aus automatischer Spracherkennung und enthält "
-          "Hörfehler (Namen, Fachbegriffe, Produktnamen, Zahlen). Korrigiere "
-          "offensichtliche Fehler stillschweigend aus dem Kontext und verwende "
-          "eine Schreibweise durchgängig. Bei echter Unsicherheit übernimm den "
-          "Begriff unverändert. Erwähne die Korrekturen nicht.\n\n"
-          "AUFGABEN UND VERANTWORTLICHE\n"
-          "- Erfasse JEDE Aufgabe, Zusage und Frist — auch beiläufige in "
-          "Ich-Form („ich schicke …“, „ich muss bis Freitag …“) und Bitten "
-          "(„Kannst du …“ → zuständig ist der/die Angesprochene).\n"
-          "- Sprecher heißen im Transkript nur „Sprecher 1“, „Vor Ort 1“, „Ich“ "
-          "usw. Übernimm diese Labels wörtlich als Verantwortliche.\n"
-          "- Ein im Gespräch genannter Name („die Seite von Julia“) ist meist das "
-          "THEMA, nicht der Sprecher. Ordne einer benannten Person nur zu, was "
-          "sie laut Transkript ausdrücklich übernimmt.\n"
-          "- Unklar, wer zuständig ist? Dann lass die Person weg. Nie raten, nie "
-          "Platzhalter wie „unbekannt“. Erfinde keine Aufgaben oder Fristen.\n\n"
-          "FORMAT — antworte NUR mit diesen vier Abschnitten, ohne Vorrede:\n"
+          "  Gut: „Zu viele parallele Designvarianten ohne verbindliche "
+          "Figma-Vorlagen — Inhalte lassen sich nicht konsistent einbauen.“\n"
+          "- Jede Information genau einmal: Was unter Entscheidungen, Aufgaben "
+          "oder Offene Fragen steht, steht nicht noch einmal woanders.\n"
+          "- Keine Widersprüche: Ein Punkt ist entweder entschieden oder offen, "
+          "nie beides.\n"
+          "- Das Transkript stammt aus Spracherkennung und enthält Hörfehler. "
+          "Korrigiere offensichtliche Fehler still aus dem Kontext (z. B. "
+          "„Jason“ → „JSON“). Ergibt ein Wort oder Satz auch so keinen Sinn, lass "
+          "ihn weg — übernimm nie Unsinn.\n"
+          "- Aufgaben sind konkrete Arbeitsschritte, die jemand zusagt oder um "
+          "die jemand gebeten wird — auch beiläufige („ich schick dir …“, „kannst "
+          "du …“). Keine Aufgaben aus Floskeln, Scherzen oder bloßen Ideen.\n"
+          "- Zuständig ist, wer zusagt bzw. wer gebeten wird, mit dem "
+          "Sprecher-Label aus dem Transkript („Ich“, „Sprecher 1“ …). Ein im "
+          "Gespräch genannter Name („die Seite von Julia“) ist meist das Thema, "
+          "nicht der Sprecher. Ist unklar, wer zuständig ist, schreib die Aufgabe "
+          "ohne Person. Nie raten, nichts erfinden.\n\n"
+          "FORMAT — antworte nur mit diesen vier Abschnitten, ohne Vorrede, auf "
+          "Deutsch:\n"
           "## Zusammenfassung\n"
-          "Ein bis zwei Sätze zum Kernthema bzw. Kernproblem. Danach nur bei "
-          "Bedarf Stichpunkte mit weiteren wesentlichen Punkten (ohne den "
-          "Einleitungssatz zu wiederholen). Aufgaben gehören nicht hierher.\n\n"
+          "2–3 Sätze: Worum ging es, was war das Problem bzw. die Ausgangslage, "
+          "wo steht das Thema jetzt. Beschlüsse und Aufgaben gehören nicht "
+          "hierher, die stehen in ihren Abschnitten.\n\n"
           "## Entscheidungen\n"
-          "- Was wurde beschlossen und warum (oder „Keine“)\n\n"
+          "- Ausdrücklich Beschlossenes — Begründung, falls genannt\n\n"
           "## Aufgaben / To-dos\n"
-          "- Konkrete Aufgabe — Sprecher-Label, Frist (falls genannt) "
-          "(oder „Keine“)\n\n"
+          "- **Sprecher-Label:** Aufgabe (bis Frist, falls genannt)\n\n"
           "## Offene Fragen\n"
-          "- Konkret ungeklärte Punkte (oder „Keine“)",
-    "en": "Summarize the meeting for someone who was not there. Afterwards they "
-          "should know WHAT was concretely said, decided and agreed — not just "
-          "THAT something was discussed.\n\n"
-          "CONTENT\n"
-          "- Condense, don't retell: the summary is much shorter than the "
-          "transcript. A short conversation yields 2–4 bullets.\n"
-          "- Be concrete: name problems, arguments, numbers, amounts, names of "
-          "people/projects/tools, dates and deadlines as they come up.\n"
-          "- Every bullet adds new information. Nothing twice — not within a "
-          "section and not across sections.\n"
-          "- No empty meta-phrases (\"discussion about …\", \"exchange on …\", "
-          "\"mention of …\"). Write the content itself.\n"
+          "- Konkret ungeklärter Punkt\n\n"
+          "Hat ein Abschnitt keinen Inhalt, schreibe darunter nur die Zeile "
+          "„- Keine“.",
+    "en": "Summarize the meeting above for someone who was not there. Afterwards "
+          "they should know WHAT was concretely said, decided and agreed — not "
+          "just THAT something was discussed.\n\n"
+          "RULES\n"
+          "- Condense, don't retell: a short conversation yields only a few "
+          "bullets, a long meeting correspondingly more.\n"
+          "- Be concrete: problems, arguments, numbers, values, names of "
+          "projects/tools, dates and deadlines as they come up. No empty "
+          "meta-phrases (\"The team discussed …\", \"exchange on …\").\n"
           "  Bad: \"Discussion about designs and consistency.\"\n"
           "  Good: \"Too many parallel design variants and no binding Figma "
-          "templates — content can't be embedded consistently.\"\n\n"
-          "TRANSCRIPTION ERRORS\n"
-          "- The transcript comes from automatic speech recognition and contains "
-          "mishearings (names, technical terms, product names, numbers). Silently "
-          "fix obvious errors from context and use one spelling throughout. If "
-          "genuinely unsure, keep the term as written. Don't mention the fixes.\n\n"
-          "TASKS AND OWNERS\n"
-          "- Capture EVERY task, commitment and deadline — including casual "
-          "first-person ones (\"I'll send …\", \"I need to … by Friday\") and "
-          "requests (\"Can you …\" → the owner is the person addressed).\n"
-          "- Speakers appear in the transcript only as \"Speaker 1\", "
-          "\"On-site 1\", \"Me\", etc. Use those labels verbatim as owners.\n"
-          "- A name dropped in conversation (\"Julia's page\") is usually the "
-          "TOPIC, not the speaker. Assign something to a named person only if the "
-          "transcript explicitly says they take it on.\n"
-          "- Owner unclear? Leave it out. Never guess, never use placeholders "
-          "like \"unknown\". Don't invent tasks or deadlines.\n\n"
-          "FORMAT — respond with ONLY these four sections, no preamble:\n"
+          "templates — content can't be embedded consistently.\"\n"
+          "- Every piece of information exactly once: what is under Decisions, "
+          "Action items or Open questions does not appear anywhere else.\n"
+          "- No contradictions: a point is either decided or open, never both.\n"
+          "- The transcript comes from speech recognition and contains "
+          "mishearings. Silently fix obvious errors from context (e.g. "
+          "\"Jason\" → \"JSON\"). If a word or sentence still makes no sense, "
+          "leave it out — never copy nonsense.\n"
+          "- Action items are concrete work steps someone commits to or is asked "
+          "to do — including casual ones (\"I'll send you …\", \"can you …\"). No "
+          "action items from pleasantries, jokes or mere ideas.\n"
+          "- The owner is whoever commits or is asked, using the speaker label "
+          "from the transcript (\"Me\", \"Speaker 1\" …). A name dropped in "
+          "conversation (\"Julia's page\") is usually the topic, not the speaker. "
+          "If the owner is unclear, write the task without a person. Never "
+          "guess, never invent.\n\n"
+          "FORMAT — respond with only these four sections, no preamble:\n"
           "## Summary\n"
-          "One or two sentences on the core topic or core problem. Then, only if "
-          "needed, bullets with further essential points (without restating the "
-          "opening). Tasks don't go here.\n\n"
+          "2–3 sentences: what it was about, what the problem or starting point "
+          "was, where the topic stands now. Decisions and tasks don't go here — "
+          "they have their own sections.\n\n"
           "## Decisions\n"
-          "- What was decided and why (or \"None\")\n\n"
+          "- What was explicitly decided — reason, if given\n\n"
           "## Action items\n"
-          "- Concrete task — speaker label, deadline (if mentioned) "
-          "(or \"None\")\n\n"
+          "- **Speaker label:** task (by deadline, if mentioned)\n\n"
           "## Open questions\n"
-          "- Concrete unresolved points (or \"None\")",
-}
-
-# Repeated AFTER the transcript: small local models drift from instructions
-# that sit thousands of tokens back, so restate the essentials last.
-_REMINDER = {
-    "de": "Schreibe jetzt die Zusammenfassung des obigen Transkripts gemäß der "
-          "Anleitung: konkret, verdichtet, ohne Wiederholungen, genau die vier "
-          "Abschnitte (Zusammenfassung, Entscheidungen, Aufgaben / To-dos, "
-          "Offene Fragen), auf Deutsch.",
-    "en": "Now write the summary of the transcript above following the "
-          "instructions: concrete, condensed, no repetition, exactly the four "
-          "sections (Summary, Decisions, Action items, Open questions).",
+          "- Concrete unresolved point\n\n"
+          "If a section has no content, write only the line \"- None\" under it.",
 }
 
 _TRANSCRIPT_LABEL = {"de": "Transkript", "en": "Transcript"}
+
+_STAMP = re.compile(r"^`\[\d+:\d+(?::\d+)?\]`\s*")
+_SPEAKER_HEAD = re.compile(r"^\*\*(.+?)\*\*\s*$")
+_SPEAKER_PREFIX = re.compile(r"^([^:.!?\n]{1,40}):\s+(.*)$")
+
+
+def compact_transcript(text: str) -> str:
+    """One ``Speaker: text`` line per turn, without timestamps or markdown.
+
+    Accepts the saved transcript body (``**Speaker**`` headers + timestamped
+    lines) or ``Speaker: text`` lines per segment. ~25–30% fewer tokens: faster
+    prefill, more meeting per chunk, and less noise for the model.
+    """
+    turns: List[list] = []
+    who = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        head = _SPEAKER_HEAD.match(line)
+        if head:
+            who = head.group(1)
+            continue
+        line = _STAMP.sub("", line)
+        m = _SPEAKER_PREFIX.match(line)
+        spk, said = (m.group(1).strip(), m.group(2)) if m else (who, line)
+        if turns and turns[-1][0] == spk:
+            turns[-1][1].append(said)
+        else:
+            turns.append([spk, [said]])
+    return "\n".join((f"{spk}: " if spk else "") + " ".join(said) for spk, said in turns)
+
+
+def _dedupe_lines(text: str) -> str:
+    """Drop exact repeats of substantive lines (greedy-decoding loops)."""
+    seen, out = set(), []
+    for line in text.splitlines():
+        key = line.strip()
+        if len(key) > 12 and not key.startswith("#"):
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(line)
+    return "\n".join(out)
 
 _TITLE_INSTRUCTION = {
     "de": "Gib einen kurzen, konkreten Titel für dieses Meeting an — 3 bis 8 "
@@ -506,6 +538,15 @@ def _strip_thinking(text: str) -> str:
 _THINK_CLOSE = re.compile(r"</(?:ifm\|)?think(?:_fast|_faster)?>")
 
 
+def _looping(raw: str, repeats: int = 3) -> bool:
+    """True once the newest complete line already occurred ``repeats`` times."""
+    lines = raw.rstrip("\n").split("\n")
+    last = lines[-1].strip() if lines else ""
+    if len(last) <= 12:
+        return False
+    return sum(1 for l in lines if l.strip() == last) >= repeats
+
+
 def _chunks(text: str, size: int = _CHUNK_CHARS) -> List[str]:
     if len(text) <= size:
         return [text]
@@ -607,14 +648,30 @@ def summarize(
     system = _SYSTEM.get(lang, _SYSTEM["en"])
     instruction = (prompt or default_prompt(language)).strip()
     label = _TRANSCRIPT_LABEL.get(lang, "Transcript")
-    # Custom prompts may ask for a different structure — no reminder for them.
-    reminder = "" if prompt else _REMINDER.get(lang, _REMINDER["en"])
+    text = compact_transcript(text) or text
+
+    def _user(chunk: str) -> str:
+        # Default prompt: transcript first, instructions last (freshest when
+        # the model starts reasoning). Custom prompts keep the classic
+        # instruction-then-transcript order their wording may rely on.
+        if prompt:
+            return f"{instruction}\n\n{label}:\n{chunk}"
+        return f"<{label.lower()}>\n{chunk}\n</{label.lower()}>\n\n{instruction}"
 
     # Reasoning models spend tokens on a hidden <think> pass before the answer,
     # so they need far more headroom. Non-thinking models answer directly.
     answer_budget = 900
     reduce_budget = 500
     think_budget = 4000  # extra tokens reserved for the reasoning pass
+
+    # Mild repetition penalty over the recent output. Greedy decoding on long
+    # meetings otherwise drifts into restating every decision as a task, or
+    # loops one bullet until the token cap. Measured on K2 Horizon 7B with real
+    # 30-min meetings: all four sections every time, ~40% faster; temperature
+    # sampling instead dropped whole sections.
+    from mlx_lm.sample_utils import make_logits_processors
+
+    penalty = make_logits_processors(repetition_penalty=1.05, repetition_context_size=256)
 
     def _generate(user: str, max_tokens: int, use_thinking: bool, **extra) -> str:
         messages = [{"role": "system", "content": system},
@@ -627,8 +684,11 @@ def summarize(
         except TypeError:
             chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
         raw = ""
-        for resp in stream_generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens):
+        for resp in stream_generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens,
+                                    logits_processors=penalty):
             raw += resp.text
+            if "\n" in resp.text and _looping(raw):
+                break  # stuck repeating one line; the rest is dedupe'd away
             if on_progress is not None and resp.text:
                 if use_thinking and not _THINK_CLOSE.search(raw):
                     on_progress("thinking", raw, stage["label"])
@@ -660,16 +720,16 @@ def summarize(
 
     parts = _chunks(text)
     if len(parts) == 1:
-        return _run(f"{instruction}\n\n{label}:\n{parts[0]}\n\n{reminder}".rstrip(), answer_budget)
+        return _dedupe_lines(_run(_user(parts[0]), answer_budget))
 
     # Map-reduce for long meetings: summarize each chunk, then combine.
     partials = []
     for i, p in enumerate(parts, 1):
         stage["label"] = f"part {i}/{len(parts)}"
-        partials.append(_run(f"{instruction}\n\n{label}:\n{p}\n\n{reminder}".rstrip(), reduce_budget))
+        partials.append(_dedupe_lines(_run(_user(p), reduce_budget)))
     stage["label"] = "merge"
     reduce_instr = _REDUCE.get(lang, _REDUCE["en"])
-    return _run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget)
+    return _dedupe_lines(_run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget))
 
 
 @on_mlx_thread
