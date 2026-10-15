@@ -1,312 +1,251 @@
-# meetre
+<div align="center">
 
-Record a meeting on your Mac and turn it into a clean, speaker-labelled,
-summarised transcript. Everything runs on-device.
+# ✦ meetre
 
-![macOS](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white)
-![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-0071e3)
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+**Your meetings, written down. On your Mac. Nothing leaves it.**
+
+Record any call or room conversation, get a speaker-labelled transcript and a
+summary with decisions, action items and open questions — transcribed and
+summarised entirely on-device on Apple Silicon.
+
+![macOS 26](https://img.shields.io/badge/macOS-26-000000?logo=apple&logoColor=white)
+![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-5B5BD6)
+![On-device](https://img.shields.io/badge/100%25-on--device-30A46C)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
-meetre is **macOS and Apple Silicon only**. It is built on Apple's MLX runtime
-and ScreenCaptureKit; it does not run on Windows or Linux, and Intel Macs are not
-supported for the full pipeline.
+<img src="docs/images/library-summary.png" alt="The meetre library: a meeting's summary with decisions, action items and open questions" width="900">
 
-## Quick install
+</div>
 
-No git or admin required — one line downloads and installs everything:
+---
+
+## Install
+
+One line in Terminal — no admin password, no accounts, no API keys:
 
 ```bash
 cd ~ && curl -fsSL https://github.com/maxlkatze/meetre/archive/refs/heads/main.tar.gz | tar -xz && cd meetre-main && bash install.sh
 ```
 
-Already have git? You can clone instead:
+It sets up the on-device engine, builds **Meetre.app** into `~/Applications`
+(so it's in Launchpad and Spotlight) and opens it. A short introduction takes it
+from there:
+
+<table>
+<tr>
+<td width="33%"><img src="docs/images/onboarding-hello.png" alt="Onboarding: Hi."></td>
+<td width="33%"><img src="docs/images/onboarding-permissions.png" alt="Onboarding: two quick permissions"></td>
+<td width="33%"><img src="docs/images/onboarding-done.png" alt="Onboarding: You're set."></td>
+</tr>
+<tr>
+<td align="center"><sub>A few words, soft sounds</sub></td>
+<td align="center"><sub>Microphone + system audio, explained</sub></td>
+<td align="center"><sub>Find ✦ in your menu bar</sub></td>
+</tr>
+</table>
+
+> **Needs** Apple's free Swift tools to build the app. If they're missing the
+> installer tells you — run `xcode-select --install`, then the line above again.
+>
+> **Don't** install into `~/Downloads`, `~/Desktop` or `~/Documents`: macOS
+> blocks login items from reading those folders. The command above uses your
+> home folder, which is ideal.
+
+### Already using meetre? Upgrading
+
+**You don't need to do anything.** meetre updates itself when it starts; after
+the next update + restart, the old menu-bar version builds the new Meetre.app in
+the background, replaces its login item and Launchpad entry, and opens it.
+
+Prefer to do it right now? In Terminal:
 
 ```bash
-cd ~ && git clone https://github.com/maxlkatze/meetre.git && cd meetre && bash install.sh
+cd ~/meetre && git pull && bash install.sh     # or ~/meetre-main, wherever you installed it
 ```
 
-> ⚠️ **Don't install into `~/Downloads`, `~/Desktop` or `~/Documents`.** macOS
-> privacy protection (TCC) blocks background apps from reading those folders, so
-> the login item can't start and the `✦` menu-bar icon silently disappears after
-> launch or at the next login. The commands above install into your home folder
-> (`~/meetre-main` / `~/meetre`); a plain folder like `~/meetre` is ideal. The
-> installer refuses these protected locations and tells you how to move out.
+Recordings in progress are safe: the installer refuses to quit meetre while it's
+recording or processing a meeting.
 
-The installer needs no admin password. It uses your existing `python3`/`git` if
-present, otherwise downloads a **local, relocatable Python** and a **local git**
-(via micromamba) into `.runtime/`. It then creates a virtual environment,
-installs meetre and the menu-bar app, links `meetre` into `~/.local/bin`, asks for
-an optional HuggingFace token, links the install to the repo so auto-update works,
-registers a login startup item, and launches the menu bar.
-
-After installing, look for the `✦` icon in the top-right menu bar and click
-**Record…**. Run `meetre` any time to open the menu bar, or `meetre cli` for the
-text menu.
-
-> The first recording asks for the **Screen Recording** permission (system audio).
-> Saving to Notes asks for **Automation** permission. Both are one-time.
-
-## What it does
-
-meetre captures your microphone and the system audio (the other participants in
-Zoom, Meet, Teams, etc.), then:
-
-1. Transcribes locally with NVIDIA Parakeet TDT v3 via MLX (Metal-accelerated);
-   Whisper `large-v3-turbo` and other sizes are selectable.
-2. Optionally labels speakers using `pyannote` diarization.
-3. Summarises with a local LLM (Qwen3.5 / Gemma 4, auto-picked for your RAM)
-   into Zusammenfassung / Entscheidungen / Aufgaben / Offene Fragen.
-4. Writes a Markdown transcript and an MP3 backup, and saves the summary to Apple
-   Notes.
-
-No audio or text leaves the machine. No accounts, no API keys.
-
-## Features
-
-- Microphone and system audio, mixed into one track. System audio is captured
-  natively via ScreenCaptureKit, so no BlackHole or loopback driver is needed.
-- MLX transcription, the fastest Whisper backend on Apple Silicon — plus an
-  optional **NVIDIA Parakeet TDT v3** model (multilingual, very fast) to compare.
-- Automatic loudness levelling before transcription: soft-spoken or distant
-  participants are boosted to match louder speakers (gated so silence and
-  background noise aren't amplified), which improves accuracy on quiet voices.
-  The saved recording stays untouched.
-- Optional **VAD** (Silero) drops silence-only segments — fewer Whisper
-  hallucinations during quiet stretches — and **phoneme forced alignment**
-  (torchaudio MMS_FA) attaches exact per-word timestamps. Both on-device.
-- German by default, with multilingual and auto-detect support.
-- Speaker detection with an optional headcount hint (`auto`, `4`, or `3-6`).
-- Local LLM summaries with a fully editable prompt. Newest models built in:
-  Qwen3.5 and Gemma 4 (strongest multilingual), run in fast direct mode.
-  `auto` picks the best that fits your machine.
-- Menu-bar app with a real image icon, live status, progress bars (model
-  download, transcription, speaker detection), native notifications when a
-  meeting is ready, and a settings popup.
-- An **About meetre** submenu (version, check for updates, restart, start at
-  login, quit).
-- Auto-update (`git pull`) on every launch, and start-at-login.
-- MP3 backups, and the ability to re-transcribe any audio file later.
-
-## System requirements
-
-| | Minimum | Recommended |
-|---|---|---|
-| Mac | Apple Silicon (M1) | M2 Pro / M3 / M4 / M5 |
-| macOS | 13 Ventura (for ScreenCaptureKit) | 14 Sonoma or newer |
-| RAM | 8 GB (use a smaller summary model) | 16 GB or more |
-| Disk | ~6 GB for models | ~9 GB with speaker detection |
-| Tools | Xcode Command Line Tools (`xcode-select --install`) | — |
-
-8 GB Macs handle transcription well. For summaries on 8 GB, use `qwen3.5-4b`
-(`meetre summary-model qwen3.5-4b`) or turn summaries off. Leaving the summary
-model on `auto` always picks the best model that fits your RAM.
-
-Disk breakdown: Whisper `large-v3-turbo` is about 1.5 GB, a small summary model
-(`qwen3.5-4b`) about 2.4 GB up to `qwen3.5-35b` at ~20 GB, and Python
-dependencies 1–3 GB (the `persons` extra adds PyTorch).
-
-## Performance by Mac (approximate)
-
-Real-time factor is minutes of audio transcribed per minute of compute (higher is
-faster). Summary time is for a typical 30-minute meeting with a small/mid summary
-model. The first run also downloads the models once.
-
-| Chip | RAM | Transcribe (large-v3-turbo) | Summary | Auto summary model | Notes |
-|------|-----|------------------------------|---------|--------------------|-------|
-| M1 / M1 Pro | 8–16 GB | ~6–9x real-time | ~10–25 s | `qwen3.5-4b` / `gemma4-12b` | Great for transcripts; full pipeline from 16 GB |
-| M2 / M2 Pro/Max | 8–32 GB | ~8–12x real-time | ~8–20 s | `gemma4-12b` / `qwen3.5-9b` | Full pipeline runs smoothly |
-| M3 / M3 Pro/Max | 16–36 GB | ~10–14x real-time | ~8–18 s | `qwen3.5-9b` / `qwen3.5-35b` | Comfortable everywhere |
-| M4 / M4 Pro/Max | 16–48 GB | ~12–16x real-time | ~6–15 s | `qwen3.5-35b` | Fast |
-| M5 / M5 Pro/Max | 24–48 GB+ | ~14–18x real-time | ~5–12 s | `qwen3.5-35b` / `qwen3.5-27b` | Effortless |
-
-These are estimates, not benchmarks. They vary with thermals, other running apps,
-meeting length, and whether speaker detection is enabled. A 30-minute meeting
-typically transcribes in about 2–4 minutes on most M-series Macs.
-
-## Manual install
-
-If you prefer not to use `install.sh`:
-
-```bash
-pip install -e .            # core: MLX transcription (Whisper + Parakeet) + summaries
-pip install -e '.[menubar]' # the macOS menu-bar app (rumps + pyobjc)
-pip install -e '.[persons]' # optional speaker diarization (pyannote 4.x)
-pip install -e '.[align]'   # optional VAD + phoneme word-alignment (Whisper)
-pip install -e '.[cpu]'     # faster-whisper fallback for non-Apple-Silicon
-```
-
-## Menu bar
-
-The app lives only in the menu bar (no Dock icon) and keeps running after you
-close the terminal. It shows a real image icon (`✦`-style sparkle, tinted to
-match light/dark menus) and stays live even while the menu is open.
-
-Click the icon:
-
-- **Record…** — opens a settings popup: meeting name, transcription model,
-  language, summary model, system-audio and speaker toggles, a speaker slider,
-  and an editable AI prompt with a reset button. Choices are remembered.
-- **Stop** — finishes the recording and runs the pipeline in the background.
-- **Model / Language / Summary model / Speakers** — quick pickers. The summary
-  picker is sized for your machine: too-large models are greyed out, `✓` marks
-  downloaded ones.
-- **System audio** and **Person detection** toggles.
-- **Settings…**, **Summarize last → Apple Notes (local)**, **Open transcripts
-  folder**, and **Downloaded models** (click one to uninstall and free space).
-- **About meetre** submenu — version, **Check for updates**, **Restart meetre**,
-  **Start at login**, **Quit meetre**.
-
-While working, the menu bar shows live status — recording time `⏺ 02:14`, a
-download bar `⬇ 45%`, or a spinning `Transcribing… / Summarizing…` — and posts a
-native notification (with the app icon) such as **✓ Standup — done · 31 min**
-when the transcript and summary are ready.
-
-## Command line
-
-```bash
-meetre                       # launch the menu-bar app (default)
-meetre cli                   # interactive text menu
-meetre menubar               # launch the menu-bar app (detached)
-
-meetre record --name "Standup"   # record + transcribe (--persons to force diarization)
-meetre transcribe call.mp3       # re-transcribe an audio file (MP3/WAV)
-meetre localsummary              # summarise a transcript in-place (offline)
-meetre summarize                 # latest transcript → Apple Notes (local)
-meetre list                      # list saved transcripts
-meetre open                      # open the transcripts folder in Finder
-meetre devices                   # list audio input devices
-
-meetre model large-v3-turbo      # tiny | base | small | medium | large-v3 | large-v3-turbo | parakeet-tdt-v3
-meetre summary-model             # show summary models, sizes, and what fits
-meetre summary-model qwen3.5-35b # set summary model (alias | auto | off | HF repo id)
-meetre models                    # list downloaded models; pass a name/number to uninstall
-meetre persons on                # speaker detection (on | off)
-meetre speakers 3-6              # auto | exact (4) | range (3-6)
-
-meetre update                    # git pull + reinstall
-meetre config                    # view all settings
-meetre config <key> <value>      # set one setting
-```
-
-## Speaker detection
-
-meetre records your mic and the system audio as separate stems, so it can tell
-**you (and anyone in your room) apart from the remote participants** even before
-diarization. The transcript is produced from one mixed timeline (accurate
-timestamps); each line is then attributed to a side by which stem was active, and
-`pyannote` runs on each stem separately to split multiple speakers per side.
-
-- One person on your side: labelled `Ich` (de) / `Me` (en).
-- Several people in your room: `Vor Ort 1/2…` (de) / `Local 1/2…` (en).
-- Remote participants: `Sprecher 1/2…` (de) / `Speaker 1/2…` (en).
-
-Diarizing clean single-source stems is far more reliable than diarizing a mono
-mix of mic + system audio.
-
-```bash
-pip install -e '.[persons]'
-meetre config hf_token <token>     # free, from huggingface.co/settings/tokens
-meetre persons on
-meetre speakers 3-6                # headcount hint for the remote side
-```
-
-Speaker detection uses the `pyannote/speaker-diarization-community-1` pipeline
-(pyannote.audio 4.x) — accept its model terms at
-`huggingface.co/pyannote/speaker-diarization-community-1` first. It runs fully
-on-device (not the cloud `precision-2` variant), audio is fed straight from
-memory (no FFmpeg/torchcodec needed), and pyannote's usage telemetry is
-disabled. Live progress (segmenting / analyzing voices / assigning) shows on the
-menu-bar bar.
-
-## Local summaries
-
-Every recording is summarised on-device. The summary is embedded at the top of
-the transcript and saved to Apple Notes, generated once. Leave the model on
-`auto` and meetre runs the best one that fits your RAM.
-
-Built-in models (current generation, June 2026):
-
-| Alias | Repo | ~Size | Best for |
-|-------|------|-------|----------|
-| `qwen3.5-2b` | `Qwen3.5-2B-MLX-4bit` | 1.3 GB | 8 GB Macs, fastest |
-| `qwen3.5-4b` | `Qwen3.5-4B-MLX-4bit` | 2.4 GB | small + fast |
-| `gemma4-e4b` | `gemma-4-e4b-it-4bit` | 3.4 GB | minimal, 140+ languages |
-| `qwen3.5-9b` | `Qwen3.5-9B-4bit` | 5.0 GB | balanced, fits 16 GB |
-| `gemma4-12b` | `gemma-4-12B-4bit` | 6.8 GB | strong multilingual |
-| `mistral-24b` | `Mistral-Small-3.2-24B-…-4bit` | 13.3 GB | concise all-rounder |
-| `gemma4-26b` | `gemma-4-26b-a4b-it-4bit` | 14.5 GB | best German / multilingual |
-| `qwen3.5-27b` | `Qwen3.5-27B-4bit` | 15 GB | top dense quality |
-| `qwen3.5-35b` | `Qwen3.5-35B-A3B-4bit` | 20 GB | best all-round (MoE, fast) |
-| `qwen3.5-122b` | `Qwen3.5-122B-A10B-MLX-4bit` | 66 GB | high-RAM Studio |
-| `qwen3.5-397b` | `Qwen3.5-397B-A17B-4bit` | 210 GB | Mac Studio Ultra only |
-
-All models answer directly (no slow hidden reasoning pass) for fast, reliable
-summaries. Older `qwen3-*` / `gemma3-*` aliases still resolve for existing
-configs.
-
-```bash
-meetre summary-model             # list models, sizes, and what fits your Mac
-meetre summary-model auto        # best that fits (default)
-meetre summary-model qwen3.5-35b # best all-round on 32 GB+
-meetre summary-model qwen3.5-4b  # light + fast for 8 GB
-meetre summary-model off         # transcript only
-```
-
-The prompt is editable in the menu bar or via
-`meetre config summary_prompt "..."`.
-
-## Privacy
-
-Recording, transcription, diarization and summarization all run locally via MLX
-and PyTorch. No audio or text is uploaded. pyannote.audio's usage telemetry is
-disabled, and the cloud diarization variant is never used. The only network
-access is the one-time model downloads from HuggingFace and the optional
-`git pull` update.
-
-## Configuration
-
-Stored at `~/.config/meetre/config.json`. Keys: `model`, `language`,
-`person_detection`, `num_speakers`, `min_speakers`, `max_speakers`,
-`transcripts_dir`, `audio_backup_dir`, `mic_device`, `system_device`,
-`capture_system`, `native_system`, `hf_token`, `compute_type`, `vad`,
-`word_timestamps`, `summary_model`, `auto_summarize`, `auto_notes`,
-`summary_prompt`, `auto_update`.
-
-`vad` (default on) drops silence-only Whisper segments; `word_timestamps`
-(default on) adds per-word times via phoneme alignment. Both need the `align`
-extra and apply to the Whisper path. Turn off with `meetre config vad off` /
-`meetre config word_timestamps off`.
-
-## Updating
-
-The menu bar runs `git pull` on every launch. You can also use **Check for
-updates** or run `meetre update`. The clone from Quick install already has the
-remote configured.
+---
 
 ## How it works
 
-```
-recorder.py      mic (sounddevice) + system audio (ScreenCaptureKit Swift helper) -> mixed 16 kHz WAV
-transcriber.py   MLX Whisper / Parakeet TDT v3; gated AGC level + pyannote diarization
-align.py         Silero VAD (silence filtering) + MMS_FA phoneme word-alignment
-summarizer.py    MLX-LM (Qwen3.5 / Gemma 4, direct mode) with an editable prompt
-transcript.py    Markdown writer (summary + timestamped, speaker-labelled body)
-integrations.py  Apple Notes (AppleScript)
-menubar.py       rumps + AppKit status-bar app
-updater.py       git-pull self-update
-autostart.py     login LaunchAgent
-```
+**1 · Record.** Click ✦ in the menu bar and press record — or accept the prompt
+when a Teams call starts. meetre captures your microphone and the system audio
+(everyone else on the call), no virtual audio driver needed.
 
-## Contributing
+<table>
+<tr>
+<td width="33%"><img src="docs/images/popover-idle.png" alt="Menu bar popover, ready to record"></td>
+<td width="33%"><img src="docs/images/popover-recording.png" alt="Menu bar popover while recording, with the live caption"></td>
+<td width="33%"><img src="docs/images/popover-steps.png" alt="Menu bar popover while processing: Preparing, Transcribing, Speakers, Summary, Saving"></td>
+</tr>
+<tr>
+<td align="center"><sub>Ready</sub></td>
+<td align="center"><sub>Recording, with a live caption</sub></td>
+<td align="center"><sub>Every step, in its own color</sub></td>
+</tr>
+</table>
 
-Pull requests are welcome. It is a small, hackable Python codebase.
+**2 · Follow along.** Live captions float in a click-through panel in the
+top-right corner — collapsed to a slim header by default, one click to expand.
+
+<img src="docs/images/hud-live-transcript.png" alt="Live transcript overlay" width="440">
+
+**3 · Read what matters.** When you stop, meetre transcribes, works out who
+said what, and writes a summary — then saves everything as Markdown and to
+Apple Notes. The menu bar shows each step (preparing → transcribing → speakers →
+summary → saving) and a green ✓ when it's done.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/library-transcript.png" alt="Speaker-labelled transcript"></td>
+<td width="50%"><img src="docs/images/library-chat.png" alt="Chat about a meeting"></td>
+</tr>
+<tr>
+<td align="center"><sub>Speaker-labelled transcript</sub></td>
+<td align="center"><sub>Ask questions about any meeting</sub></td>
+</tr>
+</table>
+
+---
+
+## What's inside
+
+| | |
+|---|---|
+| 🎙 **Mic + system audio** | Captured separately and mixed; system audio via ScreenCaptureKit — no BlackHole. If a call app switches your headset mid-meeting, the mic reconnects by itself. |
+| ✍️ **Transcription** | NVIDIA **Parakeet TDT v3** on MLX (default, very fast) or Whisper (`large-v3-turbo` and smaller). Quiet voices are levelled up before transcription. |
+| 👥 **Who said what** | Your side vs. the remote side from the separate recordings, then `pyannote` splits multiple speakers per side. Names are picked up from the conversation when they're clearly stated. |
+| ✦ **Summaries** | A local LLM (**K2 Horizon 7B** by default) writes *Summary · Decisions · Action items · Open questions* — tuned and benchmarked on real meetings. The prompt is yours to edit. |
+| 💬 **Chat** | Ask about any meeting ("what did we decide?"), with optional web search, file access and MCP tools. |
+| 📞 **Call detection** | Offers to record when a Teams call starts, and to stop when it ends. |
+| 🔒 **Private** | Audio and text never leave your Mac. No accounts, no telemetry. |
+
+<img src="docs/images/call-prompt.png" alt="Teams call detected — record and transcribe this call?" width="440">
+
+---
+
+## Requirements
+
+| | Minimum | Recommended |
+|---|---|---|
+| Mac | Apple Silicon (M1) | M3 or newer |
+| macOS | 26 | 26 |
+| Memory | 8 GB (smaller summary model) | 16 GB or more |
+| Disk | ~6 GB for models | ~9 GB with speaker detection |
+
+A 30-minute meeting typically transcribes in under a minute with Parakeet, and
+summarises in about 15 seconds with K2 Horizon on an M-series Mac.
+
+---
+
+## Troubleshooting
+
+**System audio isn't recorded / meetre keeps asking for Screen Recording.**
+macOS gates system audio behind *Screen Recording* and applies it only after
+the app restarts. Allow it once, let meetre restart, done — it stays allowed
+across updates. If it seems stuck, reset it and allow again:
+`tccutil reset ScreenCapture net.cubedpixels.meetre.app`.
+
+**Something went wrong.** Open **Settings ▸ Advanced ▸ Error log** and press
+**Copy error log** (or **Copy log** on any error banner) — it copies versions,
+settings and the relevant errors, never transcripts or summaries. Paste it into
+an issue. Full logs live in `~/Library/Logs/meetre/`.
+
+**Restart meetre:** menu bar ▸ ↻ Restart meetre, or `meetre restart` in Terminal.
+
+---
+
+<details>
+<summary><b>Speaker detection setup</b></summary>
+
+Who-said-what works out of the box for *you vs. the others*. To also split
+several remote speakers, meetre uses `pyannote/speaker-diarization-community-1`
+(fully on-device). It needs a free Hugging Face token — accept the model terms at
+`huggingface.co/pyannote/speaker-diarization-community-1` first, then paste the
+token in the introduction, or:
 
 ```bash
-bash install.sh
-.venv/bin/python -m py_compile src/meetre/*.py   # quick sanity check
+meetre config hf_token <token>
+meetre persons on
+meetre speakers 3-6     # optional headcount hint: auto | 4 | 3-6
 ```
+
+Labels: `Ich`/`Me` for you, `Vor Ort 1…`/`Local 1…` for several people in your
+room, `Sprecher 1…`/`Speaker 1…` for remote participants.
+
+</details>
+
+<details>
+<summary><b>Summary models</b></summary>
+
+`auto` picks the best model that fits your Mac's memory. K2 Horizon 7B is
+preferred; the rest are alternatives.
+
+| Alias | ~Size | Best for |
+|-------|-------|----------|
+| `k2-horizon-7b` | 7.2 GB | default — excellent summary writing |
+| `qwen3.5-4b` | 2.4 GB | 8 GB Macs, fast |
+| `qwen3.5-9b` | 5.0 GB | balanced, fits 16 GB |
+| `gemma4-12b` | 6.8 GB | strong multilingual |
+| `gemma4-26b` | 14.5 GB | best German / multilingual |
+| `qwen3.5-35b` | 20 GB | best all-round on 32 GB+ |
+| `qwen3.5-122b` / `-397b` | 66 / 210 GB | Mac Studio |
+
+```bash
+meetre summary-model          # list models, sizes, and what fits
+meetre summary-model auto     # best that fits (default)
+meetre summary-model off      # transcript only
+```
+
+</details>
+
+<details>
+<summary><b>Command line</b></summary>
+
+```bash
+meetre                         # open Meetre.app
+meetre restart                 # restart it (refuses while recording)
+meetre record --name "Standup" # record + transcribe in the terminal
+meetre transcribe call.mp3     # transcribe an audio file (MP3/WAV)
+meetre summarize               # latest transcript → Apple Notes
+meetre list | open | devices   # transcripts, folder, audio inputs
+meetre model parakeet-tdt-v3   # or tiny … large-v3-turbo
+meetre persons on|off          # speaker detection
+meetre speakers 3-6            # headcount hint
+meetre config [key value]      # view / change settings
+meetre update                  # update now
+```
+
+Settings live in `~/.config/meetre/config.json`; transcripts in
+`~/Documents/meetre/transcripts` (configurable).
+
+</details>
+
+<details>
+<summary><b>Architecture & development</b></summary>
+
+```
+Meetre.app (SwiftUI, mac/)  ── JSON-RPC over stdio ──▶  meetre engine (Python, src/meetre/)
+  menu bar · library · settings                           recording · Parakeet/Whisper · pyannote
+  live overlays · onboarding                              K2 summaries · chat · Apple Notes
+```
+
+- Design rules: [`docs/DESIGN.md`](docs/DESIGN.md) · roadmap, protocol and the
+  planned iCloud sync + iPhone companion: [`docs/ROADMAP.md`](docs/ROADMAP.md)
+- Build the app: `bash mac/build.sh` → `mac/build/Meetre.app`
+- UI without the engine: `MEETRE_FAKE_ENGINE=1 mac/.build/release/Meetre --open-library`
+- Engine smoke test: `.venv/bin/python scripts/engine_smoke.py`
+
+</details>
+
+## Privacy
+
+Recording, transcription, speaker detection and summaries all run locally (MLX,
+PyTorch). Nothing is uploaded. The only network access is the one-time model
+downloads from Hugging Face and meetre's own updates from GitHub.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

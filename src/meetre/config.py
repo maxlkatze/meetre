@@ -92,8 +92,11 @@ class Config:
     # overlay in the top-right corner while recording (preview only — the
     # saved transcript comes from the full pass after recording).
     live_transcript: bool = True
-    # Live transcript overlay collapsed to its header strip (its ⌃ button).
-    live_transcript_minimized: bool = False
+    # The overlays start collapsed to their header strip; their chevron
+    # expands them. (Replaces live_transcript_minimized, which defaulted to
+    # expanded — a new key so saved configs pick up the new default.)
+    live_transcript_expanded: bool = False
+    summary_overlay_expanded: bool = False
     # After speaker detection, let the local LLM read the transcript for
     # explicit name evidence ("Thanks, Anna …") and replace "Speaker 2" with
     # the real name. Names are verified against the transcript before use.

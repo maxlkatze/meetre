@@ -155,24 +155,40 @@ class WavTail:
 
 
 class _Source:
-    """Streams one input device to a temporary WAV at its native rate."""
+    """Streams one input device to a temporary WAV at its native rate.
+
+    Survives the device changing under it — typically a call app switching a
+    Bluetooth headset into hands-free mode, which silently kills the stream:
+    a watchdog reopens the input when callbacks stop arriving, and the new
+    audio (resampled to the file's rate if needed) continues the same WAV.
+    Stopping never blocks: PortAudio's stop() can hang forever on a dead
+    device, so it runs on a helper thread with a deadline.
+    """
+
+    STALL_SECONDS = 2.0   # no audio callback for this long → reopen
+    STOP_DEADLINE = 3.0   # give up on a hung PortAudio stop/close after this
 
     def __init__(self, device: int):
         self.device = device
         self._queue: "queue.Queue" = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._watch: Optional[threading.Thread] = None
         self._stream = None
         self.path = Path(tempfile.mktemp(suffix=f"_meetre_{device}.wav"))
-        self.samplerate = SAMPLE_RATE
+        self.samplerate = SAMPLE_RATE      # the WAV's rate (fixed once written)
+        self._stream_rate = SAMPLE_RATE    # the live stream's rate (may change)
+        self._last_cb = 0.0
         self.frames = 0
+        self.reopened = 0
 
     @property
     def seconds(self) -> float:
         return self.frames / self.samplerate if self.samplerate else 0.0
 
     def _callback(self, indata, frames, time_info, status):  # noqa: ARG002
-        self._queue.put(indata.copy())
+        self._last_cb = time.monotonic()
+        self._queue.put((self._stream_rate, indata.copy()))
 
     def _writer(self):
         import soundfile as sf
@@ -183,46 +199,114 @@ class _Source:
         ) as f:
             while not self._stop.is_set() or not self._queue.empty():
                 try:
-                    block = self._queue.get(timeout=0.1)
+                    rate, block = self._queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
                 # Downmix any multi-channel input to mono.
                 if block.ndim > 1 and block.shape[1] > 1:
                     block = block.mean(axis=1, keepdims=True)
+                if rate != self.samplerate and len(block):
+                    # A reopened device may run at a different rate.
+                    n = max(1, int(round(len(block) * self.samplerate / rate)))
+                    block = np.interp(np.linspace(0, len(block), n, endpoint=False),
+                                      np.arange(len(block)), block[:, 0]
+                                      ).astype("float32").reshape(-1, 1)
                 f.write(block)
                 self.frames += len(block)
 
-    def start(self):
+    def _open(self, device):
+        """Open (not start) an input stream on ``device``; returns (stream, rate)."""
         import sounddevice as sd
 
         # Prefer 16 kHz; fall back to the device default rate if rejected.
         for rate in (SAMPLE_RATE, None):
             try:
-                sr = rate or int(sd.query_devices(self.device)["default_samplerate"])
-                self._stream = sd.InputStream(
-                    samplerate=sr, channels=CHANNELS,
-                    device=self.device, callback=self._callback,
-                )
-                self.samplerate = sr
-                break
-            except Exception:
-                self._stream = None
-        if self._stream is None:
-            raise RuntimeError(f"Could not open audio device {self.device}")
+                sr = rate or int(sd.query_devices(device)["default_samplerate"])
+                stream = sd.InputStream(samplerate=sr, channels=CHANNELS,
+                                        device=device, callback=self._callback)
+                return stream, sr
+            except Exception:  # noqa: BLE001
+                continue
+        raise RuntimeError(f"Could not open audio device {device}")
 
+    def start(self):
+        self._stream, self._stream_rate = self._open(self.device)
+        self.samplerate = self._stream_rate
+        self._last_cb = time.monotonic()
         self._thread = threading.Thread(target=self._writer, daemon=True)
         self._thread.start()
         self._stream.start()
+        self._watch = threading.Thread(target=self._watchdog, daemon=True)
+        self._watch.start()
+
+    def _watchdog(self):
+        import sys
+
+        while not self._stop.wait(0.5):
+            if time.monotonic() - self._last_cb < self.STALL_SECONDS:
+                continue
+            # The stream died (device reconfigured / switched). Drop it
+            # without waiting on it, then reopen: same device first, else the
+            # current default input after PortAudio rescans the devices.
+            old, self._stream = self._stream, None
+            _close_quietly(old, self.STOP_DEADLINE)
+            for attempt in ("same", "default"):
+                try:
+                    if attempt == "default":
+                        import sounddevice as sd
+
+                        sd._terminate()
+                        sd._initialize()
+                        dev = sd.default.device[0]
+                    else:
+                        dev = self.device
+                    stream, rate = self._open(dev)
+                    self._stream_rate = rate
+                    self._last_cb = time.monotonic()
+                    stream.start()
+                    self._stream = stream
+                    self.reopened += 1
+                    print(f"meetre: mic stream stalled — reopened ({attempt} device {dev}, "
+                          f"{rate} Hz)", file=sys.stderr)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    print(f"meetre: mic reopen ({attempt}) failed: {e}", file=sys.stderr)
+            else:
+                self._last_cb = time.monotonic()  # retry after another stall window
 
     def stop(self):
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        # Finish the WAV first, from what's already queued — never wait on the
+        # device: a dead stream's stop() can block forever.
         self._stop.set()
+        old, self._stream = self._stream, None
+        _close_quietly(old, self.STOP_DEADLINE)
         if self._thread is not None:
-            self._thread.join()
+            self._thread.join(timeout=10)
             self._thread = None
+
+
+def _close_quietly(stream, deadline: float) -> None:
+    """stop()+close() a PortAudio stream on a helper thread; abandon it if
+    that hangs (dead device) instead of hanging the caller."""
+    if stream is None:
+        return
+    import sys
+
+    def run():
+        try:
+            stream.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    t = threading.Thread(target=run, daemon=True, name="meetre-stream-close")
+    t.start()
+    t.join(timeout=deadline)
+    if t.is_alive():
+        print("meetre: audio stream didn't stop in time — abandoned it", file=sys.stderr)
 
 
 class _SystemAudioSource:
@@ -356,8 +440,25 @@ class Recorder:
         return {getattr(s, "role", "source"): s.path for s in self._sources}
 
     def stop(self) -> Path:
+        # Stop EVERY source even if one fails: a mic that errors on stop must
+        # not leave the system-audio helper capturing forever, nor throw away
+        # the audio that was recorded.
+        import sys
+
+        errors = []
         for src in self._sources:
-            src.stop()
+            role = getattr(src, "role", "source")
+            t0 = time.monotonic()
+            try:
+                src.stop()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{role}: {e}")
+            print(f"meetre: stopped {role} in {time.monotonic() - t0:.1f}s"
+                  + (f" (mic reopened {src.reopened}×)" if getattr(src, "reopened", 0) else ""),
+                  file=sys.stderr, flush=True)
+        if errors:
+            print("meetre: error stopping audio source(s): " + "; ".join(errors), file=sys.stderr)
+            self.start_errors.extend(errors)
         return self._mix()
 
     def _mix(self) -> Path:

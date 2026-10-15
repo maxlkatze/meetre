@@ -26,6 +26,15 @@ audio or text leaves the machine.
 - `meetre model SIZE`, `meetre summary-model CHOICE`, `meetre persons on|off`,
   `meetre speakers SPEC`, `meetre config [KEY VALUE]`.
 
+## Native app (`mac/`) — in progress
+
+SwiftUI app (macOS 26) per `docs/DESIGN.md` (design & rule book — follow it)
+and `docs/ROADMAP.md` (architecture, engine protocol, storage v2 / iCloud
+sync, companion app plan). `mac/build.sh` → `mac/build/Meetre.app`. It spawns
+`python -m meetre engine` (JSON-RPC over stdio) and never imports Python.
+`MEETRE_FAKE_ENGINE=1` uses `mac/Scripts/fake_engine.py` fixtures; debug flags
+(`--open-library`, `--preview-popover`, `--demo-record` …) in `MeetreApp.swift`.
+
 ## Module map (`src/meetre/`)
 
 - `menubar.py` — macOS status-bar app (rumps + AppKit). Click-to-record icon,
@@ -56,6 +65,11 @@ audio or text leaves the machine.
 - `live.py` — `LiveTranscriber`: tails the recorder's WAVs (`recorder.WavTail`)
   and re-decodes the uncommitted window via `transcriber.transcribe_live`
   (MLX thread); mic-vs-system energy labels speakers. Preview only.
+- `engine.py` — headless JSON-RPC server for the native app (`meetre engine`);
+  stdout is protocol-only (all other output goes to stderr).
+  `scripts/engine_smoke.py` exercises it.
+- `pipeline.py` — UI-free post-recording pipeline (`Pipeline.process`, `Hooks`)
+  shared by `menubar.py` and `engine.py`.
 - `ui.py` — Rich CLI tables/panels. `__init__.py` — silences dep log noise.
 
 ## Notes / gotchas
@@ -80,7 +94,11 @@ audio or text leaves the machine.
   on load, so the spec pins `revision` to a reviewed commit (honored by
   `downloads.ensure_model` and `load(..., revision=)`). Re-review that file before
   bumping the pin. K2 always reasons (`<ifm|think…>` tags); use
-  `reasoning_effort="low"` — "medium" overran the think budget for identical text.
+  `reasoning_effort="low"`. Note "low" = *no* reasoning (K2 closes the think
+  block at once). Re-measured 2026-10-15 on 1–31 min meetings: medium is
+  2.5–13× slower (165 s for 31 min) with worse owners/phrasing; high took
+  60–214 s, truncated one answer and looped forever on a misheard word in
+  another. Keep "low" unless a new model/prompt is re-benchmarked.
 - **Summary prompt is tuned for K2** (benchmarked on real 1–31 min meetings).
   Default prompt goes *after* the transcript (compacted to one `Speaker: text`
   line per turn by `compact_transcript`); custom prompts keep instruction-first.

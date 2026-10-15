@@ -542,7 +542,9 @@ def _looping(raw: str, repeats: int = 3) -> bool:
     """True once the newest complete line already occurred ``repeats`` times."""
     lines = raw.rstrip("\n").split("\n")
     last = lines[-1].strip() if lines else ""
-    if len(last) <= 12:
+    # Headers legitimately recur: reasoning models draft the answer (with its
+    # "## …" sections) inside the think block before writing it for real.
+    if len(last) <= 12 or last.startswith("#"):
         return False
     return sum(1 for l in lines if l.strip() == last) >= repeats
 
@@ -780,8 +782,12 @@ def generate_title(
 def _clean_title(text: str) -> str:
     """Reduce model output to a single, filename-friendly title line."""
     line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    # Drop common lead-ins, surrounding quotes/markdown and a trailing period.
-    line = re.sub(r'^(title|titel)\s*[:\-]\s*', "", line, flags=re.IGNORECASE)
+    # Drop common lead-ins ("**Titel:** …"), surrounding quotes/markdown and a
+    # trailing period — and any leftover leading ":"/dash, which otherwise
+    # ends up in file names and Note titles (": Tanzen von …").
+    line = line.replace("**", "").replace("__", "")
+    line = re.sub(r'^\s*(title|titel)\s*[:\-–—]\s*', "", line, flags=re.IGNORECASE)
+    line = line.strip().strip('"\'`„“”').lstrip(":-–— ")
     # Strip surrounding quotes/markdown and trailing punctuation together so a
     # model that emits e.g. "Q3 Budget Review". loses both the period and quote.
     return line.strip().strip('"\'`*#.').strip()

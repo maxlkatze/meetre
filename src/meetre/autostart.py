@@ -6,9 +6,10 @@ No admin needed — LaunchAgents live in the user's ``~/Library/LaunchAgents``.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
-import sys
 from pathlib import Path
+from typing import Optional
 
 LABEL = "com.agendaro.meetre.menubar"
 _AGENT_DIR = Path(os.path.expanduser("~/Library/LaunchAgents"))
@@ -20,12 +21,26 @@ def is_enabled() -> bool:
     return PLIST_PATH.exists()
 
 
-def _plist_xml() -> str:
+def app_target() -> Optional[str]:
+    """The Meetre.app the login item launches, or None for the Python menu bar."""
+    if not is_enabled():
+        return None
+    m = re.search(r"<string>(.+?\.app)/Contents/MacOS/Meetre</string>", PLIST_PATH.read_text())
+    return m.group(1) if m else None
+
+
+def _plist_xml(app: Optional[str] = None) -> str:
     # Always the venv interpreter — sys.executable may be the meetre.app
     # bundle symlink, which can't import meetre without our PYTHONPATH.
     from .bundle import _venv_python
 
     python = str(_venv_python())
+    if app:  # the native app (it starts the engine itself)
+        exe = Path(app) / "Contents" / "MacOS" / "Meetre"
+        args = f"    <string>{exe}</string>"
+    else:
+        args = (f"    <string>{python}</string>\n    <string>-m</string>\n"
+                "    <string>meetre.menubar</string>")
     # Include common dirs + a bundled local git on PATH for auto-update.
     root = Path(__file__).resolve().parents[2]
     path = (f"{Path(python).parent}:{root}/.runtime/conda/bin:{root}/.runtime/git/bin:"
@@ -40,9 +55,7 @@ def _plist_xml() -> str:
   <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{python}</string>
-    <string>-m</string>
-    <string>meetre.menubar</string>
+{args}
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>{path}</string></dict>
@@ -54,11 +67,13 @@ def _plist_xml() -> str:
 """
 
 
-def enable() -> None:
-    """Install + load the LaunchAgent (starts now and at every login)."""
+def enable(app: Optional[str] = None) -> None:
+    """Install + load the LaunchAgent (starts now and at every login).
+
+    ``app`` = path to Meetre.app to start that instead of the Python menu bar."""
     _AGENT_DIR.mkdir(parents=True, exist_ok=True)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    PLIST_PATH.write_text(_plist_xml())
+    PLIST_PATH.write_text(_plist_xml(app))
     # Reload so changes take effect immediately.
     subprocess.run(["launchctl", "unload", str(PLIST_PATH)],
                    capture_output=True, text=True)
@@ -68,8 +83,10 @@ def enable() -> None:
 
 def repair() -> None:
     """Rewrite a stale/broken login item in place (picked up at next login)."""
-    if is_enabled() and PLIST_PATH.read_text() != _plist_xml():
-        PLIST_PATH.write_text(_plist_xml())
+    if is_enabled():
+        app = app_target()  # keep whichever app the login item targets
+        if PLIST_PATH.read_text() != _plist_xml(app):
+            PLIST_PATH.write_text(_plist_xml(app))
 
 
 def disable() -> None:

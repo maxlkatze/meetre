@@ -390,8 +390,17 @@ def do_open(cfg: Config) -> None:
 
 
 def do_menubar(cfg: Config) -> None:
-    """Launch the menu-bar app detached so the terminal can be closed."""
+    """Open the native Meetre.app (falls back to the legacy Python menu bar
+    only when the app hasn't been built, e.g. a source checkout)."""
     import os
+
+    from . import instances
+
+    app = instances.app_path()
+    if app is not None:
+        subprocess.run(["/usr/bin/open", str(app)])
+        ui.ok("meetre opened (✦ top-right). You can close this terminal.")
+        return
 
     log_dir = Path(os.path.expanduser("~/.cache/meetre"))
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -830,6 +839,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("menubar", help="Launch the macOS menu-bar app (default)")
     sub.add_parser("cli", help="Start the interactive text menu")
     sub.add_parser("restart", help="Restart the menu-bar app (replaces running instances)")
+    sub.add_parser("engine", help="Run the headless JSON-RPC engine (used by the native app)")
     sub.add_parser("update", help="Update meetre to the latest version (git pull)")
     sub.add_parser("list", help="List saved transcripts")
     sub.add_parser("open", help="Open the transcripts folder in Finder")
@@ -876,6 +886,10 @@ def main(argv: Optional[list] = None) -> int:
             do_local_summarize(cfg, args.file)
         elif args.command == "menubar":
             do_menubar(cfg)
+        elif args.command == "engine":
+            from . import engine
+
+            return engine.main()
         elif args.command == "restart":
             from . import instances
 

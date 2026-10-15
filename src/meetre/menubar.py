@@ -75,21 +75,6 @@ def _ensure_bundle_identifier(bundle_id: str = "net.cubedpixels.meetre") -> None
         pass
 
 
-def _summary_error_hint(e: Exception) -> str:
-    """Turn a raw summarizer error into an actionable message.
-
-    The most common one is an mlx-lm too old for a newer architecture (e.g.
-    'Model type gemma4 not supported'), which otherwise surfaces as a fleeting
-    failure and an empty summary. Point the user at the update path instead.
-    """
-    msg = str(e)
-    low = msg.lower()
-    if "not supported" in low or "model type" in low or "unknown model" in low:
-        return ("This model needs a newer mlx-lm. Run 'meetre update', or pick "
-                "another summary model. (" + msg + ")")
-    return msg
-
-
 def _app_version() -> str:
     """Version for the About submenu ('?' if unknown).
 
@@ -469,6 +454,47 @@ def _show_call_prompt(status_item, title: str, message: str, buttons, on_choice)
 # Status-bar app
 # ---------------------------------------------------------------------------
 
+class _MenubarHooks:
+    """Pipeline hooks → menu bar status, notifications and the summary HUD."""
+
+    def __init__(self, app):
+        self.app = app
+        self._live = False
+
+    def stage(self, text):
+        self.app._stage(text)
+
+    def progress(self, label, frac, icon="🔍"):
+        self.app._progress(label, frac, icon)
+
+    def download(self, label, frac):
+        self.app._download = ("⬇", label, frac)
+
+    def download_done(self):
+        self.app._download = None
+
+    def notify(self, title, subtitle, msg):
+        self.app._notify(title, subtitle, msg)
+
+    def summary_begin(self, model):
+        self._live = self.app.cfg.summary_overlay
+        if self._live:
+            self.app._overlay.begin(model)
+
+    def summary_feed(self, phase, text, stage=""):
+        if self._live:
+            self.app._overlay.feed(phase, text, stage)
+
+    def summary_finish(self, text):
+        if self._live:
+            self.app._overlay.finish(text)
+
+    def published(self, out, stage):
+        self.app._last_path = out["path"]
+        if out["note"] not in (None, "failed"):
+            self.app._last_note = out["note"]
+
+
 class MeetreApp(rumps.App if rumps else object):
     def __init__(self):
         # Must run before any notification: gives the unbundled process a bundle
@@ -524,7 +550,7 @@ class MeetreApp(rumps.App if rumps else object):
         self._overlay_timer.start()
         # Live captions HUD while recording (same corner, never at the same time).
         self._live_overlay = TranscriptOverlay(
-            minimized=self.cfg.live_transcript_minimized,
+            minimized=not self.cfg.live_transcript_expanded,
             on_minimize=self._on_live_minimized)
         self._live_timer = rumps.Timer(self._live_overlay.tick, 1 / 15)
         self._live_timer.start()
@@ -785,26 +811,20 @@ class MeetreApp(rumps.App if rumps else object):
                 self._stop_live()
 
     def _on_live_minimized(self, minimized):
-        self.cfg.live_transcript_minimized = minimized
+        self.cfg.live_transcript_expanded = not minimized
         self.cfg.save()
 
     def _start_live(self):
         """Start live captions for the current recording (best-effort)."""
-        from . import transcriber
-        from .live import LiveTranscriber
+        from . import pipeline, transcriber
 
         if self._live is not None or self._recorder is None:
             return
         if not transcriber.live_supported(self.cfg.model):
             return
-        lbl = transcriber._labels(self.cfg.language)
-        labels = {"mic": (self.cfg.my_name or "").strip() or lbl["local"],
-                  "system": lbl["remote"]}
         self._live_overlay.begin(self.cfg.model)
-        self._live = LiveTranscriber(self._recorder.live_paths(), self.cfg.model,
-                                     self.cfg.language, self._live_overlay.feed_lines,
-                                     labels)
-        self._live.start()
+        self._live = pipeline.start_live(self.cfg, self._recorder,
+                                         self._live_overlay.feed_lines)
 
     def _stop_live(self):
         if self._live is not None:
@@ -1001,17 +1021,10 @@ class MeetreApp(rumps.App if rumps else object):
         ``name`` is the user-supplied meeting title; when empty/None the title
         is provisionally a timestamp and ``_auto_title`` is set so :meth:`_finish`
         replaces it with an LLM-generated title derived from the summary."""
-        from . import recorder as rec
-        from . import transcriber
+        from . import pipeline, transcriber
 
         if transcriber.available_backend() is None:
             rumps.alert("No transcription backend installed (pip install mlx-whisper).")
-            return
-
-        mic = self.cfg.mic_device if self.cfg.mic_device is not None else rec.default_input_device()
-        native = bool(self.cfg.capture_system)
-        if mic is None and not native:
-            rumps.alert("No audio input device found.")
             return
 
         name = (name or "").strip()
@@ -1021,9 +1034,8 @@ class MeetreApp(rumps.App if rumps else object):
         stamp = started.strftime("%Y-%m-%d_%H-%M-%S")
         tmp_wav = Path(tempfile.gettempdir()) / f"meetre_{stamp}.wav"
 
-        recorder = rec.Recorder(mic_device=mic, system_device=None, native_system=native)
         try:
-            recorder.start(tmp_wav)
+            recorder = pipeline.begin_recording(self.cfg, tmp_wav)
         except Exception as e:  # noqa: BLE001
             rumps.alert("Could not start recording", str(e))
             return
@@ -1073,214 +1085,23 @@ class MeetreApp(rumps.App if rumps else object):
         else:
             self._download = (icon, label, max(0.0, min(1.0, frac)))
 
-    def _tx_progress(self, done, total):
-        """Adapter: transcription reports (seconds_done, total_seconds)."""
-        self._progress("Transcribing", (done / total) if total else None, icon="✏️")
+    def _pipeline(self):
+        """A pipeline over the current settings, reporting into this app."""
+        from . import pipeline
 
-    def _ensure_model(self, repo, label):
-        """Download a model if needed, streaming progress to the menu bar."""
-        from . import downloads
-
-        if downloads.is_cached(repo):
-            return
-
-        def cb(frac, done, total):
-            self._download = ("⬇", label, frac)
-
-        try:
-            downloads.ensure_model(repo, cb)
-        finally:
-            self._download = None
+        return pipeline.Pipeline(self.cfg, _MenubarHooks(self))
 
     def _finish(self):
-        from . import recorder as rec
-        from . import transcriber
-        from .transcript import _slugify
-
-        title, started, tmp_wav = self._rec_meta
-        recorder = self._recorder
+        title, started, _tmp_wav = self._rec_meta
         try:
-            final_audio = recorder.stop()
-            stems = dict(getattr(recorder, "stems", {}))
-            duration = recorder.seconds
-
-            # MP3 backup
-            try:
-                mp3 = self.cfg.audio_backup_path / f"{started.strftime('%Y-%m-%d_%H-%M-%S')}_{_slugify(title)}.mp3"
-                rec.save_mp3(final_audio, mp3)
-            except Exception:  # noqa: BLE001
-                import sys
-
-                from . import crashlog
-
-                crashlog._write_exception("MP3 backup failed", *sys.exc_info())
-
-            # Ensure the transcription model is present (shows a download bar).
-            self._stage("Loading transcription model…")
-            _tx_label = "Parakeet" if transcriber.is_parakeet(self.cfg.model) else "Whisper"
-            self._ensure_model(transcriber.mlx_repo(self.cfg.model), f"{_tx_label} {self.cfg.model}")
-            use_persons = self.cfg.person_detection
-
-            # Progressive output: the transcript (.md + Apple Note) is written as
-            # soon as transcription finishes, then rewritten in place once the
-            # speakers are identified and again once the summary/title are in.
-            from . import summarizer
-
-            out = {"title": title, "started": started, "duration": duration,
-                   "backend": None, "path": None, "note": None}
-            will_summarize = self.cfg.auto_summarize and summarizer.available()
-
-            def early(segs, persons):
-                if use_persons:
-                    pending = ("⏳ Sprecher werden erkannt … Zusammenfassung folgt."
-                               if will_summarize else "⏳ Sprecher werden erkannt …")
-                else:
-                    pending = "⏳ Zusammenfassung wird erstellt …" if will_summarize else None
-                self._publish(out, segs, persons, pending=pending)
-                self._notify("meetre", f"📝 {out['title']} — transcript ready",
-                             "Speakers and summary follow; the transcript updates itself."
-                             if pending else out["path"].name)
-
-            source_aware = "mic" in stems and "system" in stems
-            if source_aware:
-                # One transcription of the mix (clean timing); attribute each
-                # segment to you vs. remote from the separated stems.
-                self._stage("Transcribing…")
-
-                def on_transcribed(segs):
-                    out["backend"] = transcriber.available_backend()
-                    early(segs, True)
-                    if use_persons:
-                        self._stage("Detecting speakers…")
-
-                segments, backend = transcriber.transcribe_attributed(
-                    final_audio, stems, model=self.cfg.model, language=self.cfg.language,
-                    compute_type=self.cfg.compute_type, detect_speakers=use_persons,
-                    hf_token=self.cfg.hf_token, num_speakers=self.cfg.num_speakers,
-                    min_speakers=self.cfg.min_speakers, max_speakers=self.cfg.max_speakers,
-                    progress=self._tx_progress, diar_progress=self._progress,
-                    vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
-                    merged_analysis=self.cfg.merged_analysis,
-                    on_transcribed=on_transcribed,
-                )
-                use_persons = True
-            else:
-                self._stage("Transcribing…")
-                segments, backend = transcriber.transcribe(
-                    final_audio, model=self.cfg.model, language=self.cfg.language,
-                    compute_type=self.cfg.compute_type, progress=self._tx_progress,
-                    vad=self.cfg.vad, word_align=self.cfg.word_timestamps,
-                )
-                if segments:
-                    out["backend"] = backend
-                    early(segments, False)
-                if segments and use_persons:
-                    self._stage("Detecting speakers…")
-                    try:
-                        segments = transcriber.diarize(
-                            final_audio, segments, self.cfg.hf_token,
-                            num_speakers=self.cfg.num_speakers,
-                            min_speakers=self.cfg.min_speakers,
-                            max_speakers=self.cfg.max_speakers,
-                            progress=self._progress,
-                        )
-                    except RuntimeError as e:
-                        self._notify("meetre", "Speaker detection skipped", str(e))
-                        use_persons = False
-            if not segments:
-                from . import crashlog
-
-                crashlog.note("No speech detected", f"model={self.cfg.model} "
-                              f"duration={duration:.1f}s stems={sorted(stems)}")
-                self._notify("meetre", "Done", "No speech detected.")
-                return
-            out["backend"] = backend
-
-            if use_persons:
-                self._name_speakers(segments)
-
-            # Speakers are in: refresh the transcript while the summary runs.
-            if self.cfg.person_detection and use_persons:
-                self._publish(out, segments, use_persons,
-                              pending="⏳ Zusammenfassung wird erstellt …"
-                              if will_summarize else None)
-
-            # Generate the summary ONCE; reuse it for the transcript and Notes.
-            summary = self._generate_summary(segments)
-
-            # Secondary action: when no meeting name was given (e.g. "Record
-            # with previous"), derive a concise title from the summary so the
-            # transcript and Apple Note get a meaningful name instead of a
-            # bare timestamp.
-            if getattr(self, "_auto_title", False):
-                title = self._generate_title(summary, segments, fallback=title)
-
-            out["title"] = title
-            self._stage("Saving…")
-            self._publish(out, segments, use_persons, summary=summary)
-            path = out["path"]
-            mins = int(duration // 60)
-            done_msg = ("Summary + transcript ready" if summary
-                        else "Transcript ready")
-            self._notify("meetre", f"✓ {title} — done",
-                         f"{done_msg} · {mins} min · {path.name}")
-
-            for p in [final_audio, *stems.values()]:
-                try:
-                    p.unlink(missing_ok=True)
-                except Exception:  # noqa: BLE001
-                    pass
-        except Exception as e:  # noqa: BLE001
-            import sys
-
-            from . import crashlog
-
-            crashlog._write_exception("Recording failed", *sys.exc_info())
-            self._notify("meetre", "Recording failed", str(e))
+            self._pipeline().process(self._recorder, title, started,
+                                     auto_title=getattr(self, "_auto_title", False))
         finally:
             self._recorder = None
             self._rec_meta = None
             self.state = "idle"
             self.rec_item.set_callback(self.on_record)
             self.rec_prev_item.set_callback(self.on_record_previous)
-
-    def _publish(self, out, segments, persons, *, summary="", pending=None):
-        """Write (or rewrite) the transcript .md and its Apple Note.
-
-        ``out`` carries the meeting metadata plus the current ``path``/``note``
-        so later stages update the same file and note in place. A changed
-        title (auto-titling) renames the file.
-        """
-        from . import integrations, summarizer
-        from .transcript import write_transcript
-
-        path = write_transcript(
-            segments, self.cfg.transcripts_path, title=out["title"],
-            started_at=out["started"], duration=out["duration"],
-            model=self.cfg.model, backend=out["backend"] or "?",
-            person_detection=persons, summary=summary,
-        )
-        old = out["path"]
-        if old is not None and old != path:
-            old.unlink(missing_ok=True)
-        out["path"] = self._last_path = path
-
-        if not self.cfg.auto_notes or out["note"] == "failed":
-            return
-        body = summarizer.transcript_body(path.read_text())
-        try:
-            if out["note"] is None:
-                out["note"] = integrations.add_to_apple_notes(
-                    out["title"], body, summary_md=summary or None,
-                    when=out["started"], pending=pending)
-            else:
-                integrations.update_apple_note(
-                    out["note"], out["title"], body, summary_md=summary or None,
-                    when=out["started"], pending=pending)
-            self._last_note = out["note"]
-        except RuntimeError as e:
-            out["note"] = "failed"  # don't retry (and re-notify) every stage
-            self._notify("meetre", "Apple Notes failed", str(e))
 
     def on_open_last(self, sender=None):
         """Open the most recent transcript: its Apple Note, else the .md."""
@@ -1314,146 +1135,13 @@ class MeetreApp(rumps.App if rumps else object):
         def work():
             self.state = "processing"
             try:
-                self._summarize_path(files[0])
+                self._pipeline().summarize_to_notes(files[0])
             finally:
                 self.state = "idle"
                 self._stage_text = None
                 self._download = None
 
         threading.Thread(target=work, daemon=True).start()
-
-    def _name_speakers(self, segments) -> None:
-        """Replace anonymous speaker labels with real names, in place.
-
-        Your own side ("Me"/"Ich") becomes ``cfg.my_name``; the other labels are
-        named by the local LLM from explicit evidence in the conversation
-        (introductions, being addressed by name), verified against the text.
-        """
-        from . import summarizer, transcriber
-
-        lbl = transcriber._labels(self.cfg.language)
-        mapping = {}
-        if (self.cfg.my_name or "").strip():
-            mapping[lbl["local"]] = self.cfg.my_name.strip()
-        labels = list(dict.fromkeys(s.speaker for s in segments
-                                    if s.speaker and s.speaker not in mapping))
-        if (self.cfg.name_speakers and labels and summarizer.available()
-                and self.cfg.summary_model):
-            text = "\n".join(f"{s.speaker}: {s.text}" for s in segments if s.speaker)
-            try:
-                self._stage("Naming speakers…")
-                self._ensure_model(summarizer.resolve_model(self.cfg.summary_model),
-                                   f"Summary {self.cfg.summary_model}")
-                found = summarizer.infer_speaker_names(
-                    text, labels, model=self.cfg.summary_model, language=self.cfg.language)
-                taken = set(mapping.values())
-                mapping.update({k: v for k, v in found.items() if v not in taken})
-            except Exception:  # noqa: BLE001 — naming is best-effort
-                pass
-        for s in segments:
-            if s.speaker in mapping:
-                s.speaker = mapping[s.speaker]
-
-    def _generate_summary(self, segments) -> str:
-        """Run the local LLM over segments once; '' if disabled/unavailable."""
-        from . import summarizer
-
-        if not self.cfg.auto_summarize:
-            return ""
-        if not summarizer.available():
-            self._notify("meetre", "Summary skipped", "Install mlx-lm for summaries.")
-            return ""
-        text = "\n".join(
-            (f"{s.speaker}: " if getattr(s, "speaker", None) else "") + s.text
-            for s in segments
-        )
-        try:
-            self._stage("Loading summary model…")
-            self._ensure_model(summarizer.resolve_model(self.cfg.summary_model),
-                               f"Summary {self.cfg.summary_model}")
-            self._stage("Summarizing…")
-            return self._summarize_live(text)
-        except Exception as e:  # noqa: BLE001
-            self._notify("meetre", "Summary failed", _summary_error_hint(e))
-            return ""
-
-    def _summarize_live(self, text) -> str:
-        """summarizer.summarize, streamed into the live overlay when enabled."""
-        from . import summarizer
-
-        live = self.cfg.summary_overlay
-        summary = ""
-        if live:
-            alias = self.cfg.summary_model
-            if not alias or alias == "auto":
-                alias = summarizer.default_model()
-            self._overlay.begin(alias)
-        try:
-            summary = summarizer.summarize(
-                text, model=self.cfg.summary_model, language=self.cfg.language,
-                prompt=self.cfg.summary_prompt or None,
-                on_progress=self._overlay.feed if live else None)
-            return summary
-        finally:
-            if live:
-                self._overlay.finish(summary)
-
-    def _generate_title(self, summary, segments, fallback: str) -> str:
-        """Derive a short meeting title from the summary (or transcript).
-
-        Returns ``fallback`` (the timestamp title) if summaries are disabled,
-        the backend is unavailable, or generation fails — never raises."""
-        from . import summarizer
-
-        if not self.cfg.auto_summarize or not summarizer.available():
-            return fallback
-        source = (summary or "").strip()
-        if not source:
-            source = "\n".join(
-                (f"{s.speaker}: " if getattr(s, "speaker", None) else "") + s.text
-                for s in segments
-            )
-        if not source.strip():
-            return fallback
-        try:
-            self._stage("Naming meeting…")
-            title = summarizer.generate_title(
-                source, model=self.cfg.summary_model, language=self.cfg.language)
-            return title.strip() or fallback
-        except Exception:  # noqa: BLE001
-            return fallback
-
-    def _summarize_path(self, path: Path):
-        """Manual 'Summarize last': reuse the embedded summary, else generate."""
-        from . import integrations, summarizer
-
-        md = path.read_text()
-        body = summarizer.transcript_body(md)
-        # Recover the meeting title + date from the transcript metadata so the
-        # Apple Note gets "MEETRE>{title}-{date}" rather than the filename stem.
-        mtitle, when = summarizer.meeting_meta(md)
-        title = mtitle or path.stem
-
-        # Reuse the summary already embedded in the transcript if present.
-        summary = summarizer.extract_summary(md)
-        if not summary and self.cfg.auto_summarize and summarizer.available():
-            try:
-                self._stage("Loading summary model…")
-                self._ensure_model(summarizer.resolve_model(self.cfg.summary_model),
-                                   f"Summary {self.cfg.summary_model}")
-                self._stage("Summarizing…")
-                summary = self._summarize_live(body)
-            except Exception as e:  # noqa: BLE001
-                self._notify("meetre", "Summary failed", str(e))
-
-        self._stage("Saving to Apple Notes…")
-        try:
-            integrations.add_to_apple_notes(title, body, summary_md=summary or None, when=when)
-            self._notify("meetre", "Apple Notes",
-                         "Saved summary + transcript." if summary
-                         else "Saved transcript (no summary).")
-        except RuntimeError as e:
-            self._notify("meetre", "Apple Notes failed", str(e))
 
     def on_open_folder(self, sender=None):
         import subprocess
@@ -1721,6 +1409,16 @@ def _replace_running_instances() -> None:
 
 def run():
     _require_rumps()
+    # The native Meetre.app replaces this menu bar: hand over when it's
+    # installed, or build it in the background (existing installs never re-run
+    # install.sh — they get here after an auto-update restart).
+    try:
+        from . import migrate
+
+        if migrate.to_native_app():
+            return
+    except Exception:  # noqa: BLE001
+        pass
     # Re-exec from inside meetre.app so notifications/app switcher show "meetre"
     # with our icon instead of "python3.12". No-op once already in the bundle;
     # if it can't build, we keep running in place. Must happen before any

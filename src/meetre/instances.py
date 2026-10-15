@@ -10,7 +10,7 @@ import os
 import signal
 import subprocess
 import time
-from typing import List
+from typing import List, Optional
 
 _LOG = os.path.expanduser("~/.cache/meetre/menubar.err.log")
 
@@ -108,8 +108,56 @@ def relaunch_after_exit(pid: int) -> None:
                      start_new_session=True, close_fds=True)
 
 
+def app_path():
+    """The installed Meetre.app (``~/Applications``), else the repo build."""
+    from pathlib import Path
+
+    from . import bundle
+
+    for cand in (Path.home() / "Applications" / "Meetre.app",
+                 bundle._root() / "mac" / "build" / "Meetre.app"):
+        if (cand / "Contents" / "MacOS" / "Meetre").exists():
+            return cand
+    return None
+
+
+def app_pids() -> List[int]:
+    """PIDs of running Meetre.app processes (the native app)."""
+    try:
+        out = subprocess.run(["/bin/ps", "-xo", "pid=,command="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    return [int(line.split(None, 1)[0]) for line in out.splitlines()
+            if "/Meetre.app/Contents/MacOS/Meetre" in line and line.split(None, 1)[0].isdigit()]
+
+
+def busy() -> Optional[str]:
+    """What meetre is doing if a recording is running/processing, else None.
+
+    The engine keeps ~/.cache/meetre/busy while recording or processing
+    (content: "<engine pid> <what>"); a stale file from a dead engine is
+    ignored."""
+    from pathlib import Path
+
+    f = Path(os.path.expanduser("~/.cache/meetre/busy"))
+    try:
+        pid, _, what = f.read_text().strip().partition(" ")
+    except OSError:
+        return None
+    return (what or "recording") if pid.isdigit() and _alive(int(pid)) else None
+
+
 def restart_from_outside() -> None:
     """``meetre restart``: stop every running instance, then start one."""
+    doing = busy()
+    if doing:
+        raise SystemExit(f"meetre is busy ({doing}) — stop the recording first, then restart.")
+    app = app_path()
+    if app is not None:
+        terminate(app_pids() + others())  # the app also stops its engine
+        subprocess.run(["/usr/bin/open", str(app)])
+        return
     terminate(others())
     from . import autostart
 

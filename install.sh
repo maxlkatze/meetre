@@ -4,12 +4,28 @@
 #
 #   * uses your existing python3 / git if present (>= 3.11),
 #   * otherwise downloads a LOCAL, relocatable Python into .runtime/ (no sudo),
-#   * creates a venv and installs meetre + the menu-bar app,
-#   * registers a login startup item (LaunchAgent) and launches the menu bar.
+#   * creates a venv and installs the meetre engine,
+#   * builds the native app into ~/Applications/Meetre.app and opens it —
+#     its onboarding takes it from there (options, login item, models).
 #
-# Run from the project folder:   bash install.sh
+# Run from the project folder:   bash install.sh [--persons]
+#   --persons  also install speaker detection (pyannote).
+#
+# Never interactive. Progress goes to stdout as "::meetre-step <n>/<total>
+# <label>" lines (Meetre.app's onboarding shows them); human-readable logs
+# go to stderr. MEETRE_NO_LAUNCH=1 (set by the app when it runs this
+# itself) skips building/opening the app.
 #
 set -euo pipefail
+
+PERSONS=0
+for arg in "$@"; do
+  case "$arg" in
+    --persons) PERSONS=1 ;;
+  esac
+done
+STEPS=7
+step() { printf "::meetre-step %s/%s %s\n" "$1" "$STEPS" "$2"; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
@@ -92,6 +108,7 @@ install_local_python() {
   echo "$RUNTIME/python/bin/python3"
 }
 
+step 1 "Preparing Python"
 if PY="$(find_python)"; then
   ok "Python: $PY ($("$PY" --version 2>&1))"
 else
@@ -101,6 +118,7 @@ fi
 
 # --- 2. Git (existing, else install a LOCAL git without admin) -------------
 REPO_URL="https://github.com/maxlkatze/meetre.git"
+step 2 "Getting update tools"
 GIT=""
 if git --version >/dev/null 2>&1; then
   GIT="$(command -v git)"
@@ -128,6 +146,7 @@ fi
 # and state) instead of recreating it. Only build a fresh venv when none exists
 # or the current one is broken — and then move the old one aside to .venv.old
 # rather than clobbering it in place.
+step 3 "Creating a home for meetre"
 if [ -x ".venv/bin/python" ] && .venv/bin/python -c "import sys" >/dev/null 2>&1; then
   ok "Reusing existing virtual environment (.venv)"
 else
@@ -140,12 +159,15 @@ else
   "$PY" -m venv .venv
 fi
 .venv/bin/python -m pip install -q --upgrade pip wheel
+step 4 "Installing the engine"
 info "Installing meetre + menu-bar app (this downloads MLX models on first use)…"
-.venv/bin/pip install -q -e ".[menubar]"
+EXTRAS="menubar"; [ "$PERSONS" = 1 ] && EXTRAS="menubar,persons"
+.venv/bin/pip install -q -e ".[$EXTRAS]"
 ok "meetre installed"
-info "Optional: speaker detection →  .venv/bin/pip install -e '.[persons]'"
+[ "$PERSONS" = 1 ] || info "Optional: speaker detection →  .venv/bin/pip install -e '.[persons]'"
 
 # --- 4. Add meetre to your shell PATH --------------------------------------
+step 5 "Linking the meetre command"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$ROOT/.venv/bin/meetre" "$HOME/.local/bin/meetre"
 ok "Linked 'meetre' into ~/.local/bin"
@@ -161,19 +183,14 @@ case ":$PATH:" in
 esac
 
 # --- 5. HuggingFace token (optional, for speaker detection) ----------------
-echo
-info "Speaker detection (who-said-what) needs a free HuggingFace token."
-info "Accept the terms at huggingface.co/pyannote/speaker-diarization-3.1 first."
-printf "Paste your HuggingFace token (or press Enter to skip): "
-read -r HF_TOKEN || true
-if [ -n "${HF_TOKEN:-}" ]; then
-  .venv/bin/meetre config hf_token "$HF_TOKEN" >/dev/null && ok "HuggingFace token saved"
-else
-  info "Skipped — add later with:  meetre config hf_token <token>"
+# Asked in the app's onboarding; the app passes it through when it runs us.
+if [ -n "${MEETRE_HF_TOKEN:-}" ]; then
+  .venv/bin/meetre config hf_token "$MEETRE_HF_TOKEN" >/dev/null && ok "HuggingFace token saved"
 fi
 
 # --- 6. Make this a git checkout (so auto-update works) --------------------
 # Tarball/curl installs aren't git repos; turn the folder into one tracking main.
+step 6 "Turning on auto-update"
 if [ -n "$GIT" ] && [ ! -d ".git" ]; then
   info "Linking this install to $REPO_URL for auto-update…"
   if "$GIT" init -q \
@@ -188,20 +205,77 @@ if [ -n "$GIT" ] && [ ! -d ".git" ]; then
   fi
 fi
 
-# --- 7. Startup item + launch the menu bar ---------------------------------
-info "Registering login startup item and launching the menu bar…"
-.venv/bin/python -c "from meetre import autostart; autostart.enable()"
-ok "Menu-bar app started and set to launch at login (✦ icon, top-right)."
-
-# --- 8. Done ---------------------------------------------------------------
-echo
-bold "meetre is ready."
-echo "  • Menu bar:  the ✦ icon (top-right). Click → ● Record…"
-echo "  • CLI:       .venv/bin/meetre        (add an alias if you like)"
-echo "  • Update:    .venv/bin/meetre update   (or the menu's 'Check for updates')"
-if ! git remote >/dev/null 2>&1 || [ -z "$(git remote 2>/dev/null)" ]; then
-  echo
-  warn "No git remote is configured, so auto-update can't pull yet."
-  echo "  Add one once you've pushed meetre somewhere, e.g.:"
-  echo "    git remote add origin <your-repo-url>"
+# --- 7. The app ------------------------------------------------------------
+# Never quit meetre under a running recording (the engine keeps this file
+# while recording/processing; a stale one from a dead engine is ignored).
+BUSY="$HOME/.cache/meetre/busy"
+if [ -f "$BUSY" ] && kill -0 "$(cut -d' ' -f1 "$BUSY")" 2>/dev/null; then
+  die "meetre is busy ($(cut -d' ' -f2- "$BUSY")). Stop the recording and wait until it's processed, then run this again."
 fi
+
+# Retire the legacy Python menu bar: the native app replaces it (its
+# onboarding registers Meetre.app as the login item).
+LEGACY_AGENT="$HOME/Library/LaunchAgents/com.agendaro.meetre.menubar.plist"
+if [ -f "$LEGACY_AGENT" ] && ! grep -q "Meetre.app" "$LEGACY_AGENT"; then
+  launchctl unload "$LEGACY_AGENT" >/dev/null 2>&1 || true
+  rm -f "$LEGACY_AGENT"
+  ok "Removed the old menu-bar login item"
+fi
+pkill -f "meetre.menubar" >/dev/null 2>&1 || true
+
+if [ "${MEETRE_NO_LAUNCH:-0}" = 1 ]; then
+  ok "Engine ready."
+  printf "::meetre-done\n"
+  exit 0
+fi
+
+step 7 "Building the app"
+# /usr/bin/swift always exists as a shim; xcrun tells us if it's real.
+xcrun --find swift >/dev/null 2>&1 || die "Building Meetre.app needs Apple's Swift tools.
+  Install them (free, a few minutes):   xcode-select --install
+  Then run this installer again."
+bash "$ROOT/mac/build.sh" >&2 || die "Building Meetre.app failed (see above)."
+APP_DIR="$HOME/Applications"
+mkdir -p "$APP_DIR"
+# Unchanged app → leave the installed one (and the running app) alone. Each
+# ad-hoc-signed build is a new identity to macOS, so replacing it needlessly
+# drops the Screen Recording / Microphone permissions it was granted.
+NEW="$ROOT/mac/build/Meetre.app/Contents"
+OLD="$APP_DIR/Meetre.app/Contents"
+if [ -d "$OLD" ] && cmp -s "$NEW/MacOS/Meetre" "$OLD/MacOS/Meetre" \
+   && cmp -s "$NEW/Info.plist" "$OLD/Info.plist"; then
+  "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister" -u "$ROOT/mac/build/Meetre.app" >/dev/null 2>&1 || true
+  rm -rf "$ROOT/mac/build/Meetre.app"
+  ok "Meetre.app is up to date"
+  printf "::meetre-done\n"
+  pgrep -f "/Meetre.app/Contents/MacOS/Meetre" >/dev/null || open "$APP_DIR/Meetre.app"
+  exit 0
+fi
+# Quit a running copy first: `open` on the same bundle id would otherwise just
+# bring the old build to the front instead of launching the new one.
+osascript -e 'tell application id "net.cubedpixels.meetre.app" to quit' >/dev/null 2>&1 || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  pgrep -f "/Meetre.app/Contents/MacOS/Meetre" >/dev/null || break
+  sleep 0.5
+done
+pkill -f "/Meetre.app/Contents/MacOS/Meetre" >/dev/null 2>&1 || true
+rm -rf "$APP_DIR/Meetre.app"
+cp -R "$ROOT/mac/build/Meetre.app" "$APP_DIR/Meetre.app"
+ok "Installed $APP_DIR/Meetre.app"
+
+# Exactly one meetre in Launchpad/Spotlight: unregister and delete the legacy
+# Python wrapper (meetre.app, regenerated only by the old menu bar) and the
+# build output, then register the installed copy.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+for old in "$ROOT/meetre.app" "$ROOT/mac/build/Meetre.app"; do
+  if [ -d "$old" ]; then
+    "$LSREGISTER" -u "$old" >/dev/null 2>&1 || true
+    rm -rf "$old"
+  fi
+done
+"$LSREGISTER" -f "$APP_DIR/Meetre.app" >/dev/null 2>&1 || true
+ok "Meetre is in Launchpad"
+
+printf "::meetre-done\n"
+bold "meetre is ready — opening the app."
+open "$APP_DIR/Meetre.app"

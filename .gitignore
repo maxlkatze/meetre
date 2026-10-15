@@ -22,3 +22,5 @@ dist/
 
 # Generated app bundle wrapper (built on launch for notification attribution)
 meetre.app/
+# SwiftPM build cache (mac/)
+.build/

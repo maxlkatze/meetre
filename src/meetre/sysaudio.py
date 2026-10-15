@@ -81,4 +81,23 @@ def helper_path(force: bool = False) -> Path:
         raise RuntimeError(
             "Failed to compile the system-audio helper:\n" + (proc.stderr or proc.stdout)
         )
+    _sign(_BINARY)
     return _BINARY
+
+
+_IDENTITY = "meetre Local Signing"
+
+
+def _sign(binary: Path) -> None:
+    """Sign with the stable local identity (mac/Scripts/signing-identity.sh)
+    when it exists — an ad-hoc signature changes with every compile, which
+    makes macOS forget the capture permission. Best-effort."""
+    try:
+        has = subprocess.run(["/usr/bin/security", "find-certificate", "-c", _IDENTITY],
+                             capture_output=True, timeout=10).returncode == 0
+        if has:
+            subprocess.run(["/usr/bin/codesign", "--force", "--sign", _IDENTITY,
+                            "--identifier", "net.cubedpixels.meetre.syscap", str(binary)],
+                           capture_output=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
