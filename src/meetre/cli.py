@@ -232,7 +232,7 @@ def do_record(cfg: Config, name: Optional[str] = None, persons: Optional[bool] =
     tmp_wav = Path(tempfile.gettempdir()) / f"meetre_{stamp}.wav"
 
     recorder = rec.Recorder(mic_device=mic, system_device=system, native_system=native,
-                            echo_cancellation=getattr(cfg, "echo_cancellation", False))
+                            echo_cancellation=getattr(cfg, "voice_processing_mic", False))
     recorder.start(tmp_wav)
     for msg in recorder.start_errors:
         ui.warn(f"System audio unavailable: {msg}")

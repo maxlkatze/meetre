@@ -4,7 +4,12 @@
 //
 // Voice Processing is the echo canceller FaceTime uses: it removes what the
 // Mac itself plays from the speakers (e.g. the other side of a call) from the
-// mic signal, plus noise suppression and gain control. Measured on a Mac
+// mic signal, plus noise suppression.
+//
+// OPT-IN ONLY (config `voice_processing_mic`): while it runs, macOS changes
+// the mic for every app — measured: other apps hear it ~35 dB quieter, and
+// the call's audio is ducked ~8 dB despite minimum ducking. Never use it
+// while you're in a call others need to hear you in. Measured on a Mac
 // speaker setup: the call's echo in the mic drops from +12.6 dB above the
 // room to +0.1 dB. Ducking of other apps' audio is turned off so the call
 // stays at full volume.
@@ -61,7 +66,9 @@ final class MicCapture {
                 AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
                     enableAdvancedDucking: false, duckingLevel: .min)
         }
-        input.isVoiceProcessingAGCEnabled = true
+        // Hardware AGC off: it changes the mic level for ALL apps (the call
+        // would hear you quieter). meetre levels the audio in software.
+        input.isVoiceProcessingAGCEnabled = false
         let hw = input.outputFormat(forBus: 0)
         guard hw.sampleRate > 0, hw.channelCount > 0,
               let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: hw.sampleRate,

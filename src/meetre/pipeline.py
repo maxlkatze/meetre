@@ -94,7 +94,7 @@ def begin_recording(cfg, path: Path):
     if mic is None and not native:
         raise RuntimeError("No audio input device found.")
     recorder = rec.Recorder(mic_device=mic, system_device=None, native_system=native,
-                            echo_cancellation=getattr(cfg, "echo_cancellation", False))
+                            echo_cancellation=getattr(cfg, "voice_processing_mic", False))
     recorder.start(path)
     return recorder
 
