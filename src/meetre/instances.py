@@ -26,7 +26,13 @@ def others() -> List[int]:
     pids = []
     for line in out.splitlines():
         pid, _, cmd = line.strip().partition(" ")
-        if "-m meetre.menubar" in cmd and pid.isdigit() and int(pid) not in me:
+        argv = cmd.split()
+        # The interpreter itself (venv python or the meetre.app symlink) — not
+        # any shell/grep whose command line merely mentions the module.
+        exe = os.path.basename(argv[0]) if argv else ""
+        if (argv[1:3] == ["-m", "meetre.menubar"]
+                and (exe.startswith("python") or exe == "meetre")
+                and pid.isdigit() and int(pid) not in me):
             pids.append(int(pid))
     return pids
 
