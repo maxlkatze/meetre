@@ -22,6 +22,9 @@ from typing import Optional
 _SRC = Path(__file__).parent / "helpers" / "syscap.swift"
 _CACHE_DIR = Path(os.path.expanduser("~/.cache/meetre"))
 _BINARY = _CACHE_DIR / "syscap"
+# Echo-cancelled microphone (macOS Voice Processing), same build/sign path.
+_MIC_SRC = Path(__file__).parent / "helpers" / "miccap.swift"
+_MIC_BINARY = _CACHE_DIR / "miccap"
 
 
 def swiftc_path() -> Optional[str]:
@@ -47,11 +50,11 @@ def available() -> bool:
     return _SRC.exists() and swiftc_path() is not None
 
 
-def _needs_build() -> bool:
-    if not _BINARY.exists():
+def _needs_build(src: Path = _SRC, binary: Path = _BINARY) -> bool:
+    if not binary.exists():
         return True
     # Rebuild if the Swift source has changed since the last compile.
-    return _SRC.stat().st_mtime > _BINARY.stat().st_mtime
+    return src.stat().st_mtime > binary.stat().st_mtime
 
 
 def helper_path(force: bool = False) -> Path:
@@ -60,9 +63,18 @@ def helper_path(force: bool = False) -> Path:
     Raises ``RuntimeError`` with an actionable message if the source or the
     Swift toolchain is missing, or if compilation fails.
     """
+    return _build(_SRC, _BINARY, force)
+
+
+def mic_helper_path(force: bool = False) -> Path:
+    """The compiled ``miccap`` (echo-cancelled mic) binary, building if needed."""
+    return _build(_MIC_SRC, _MIC_BINARY, force)
+
+
+def _build(_SRC: Path, _BINARY: Path, force: bool) -> Path:
     if not _SRC.exists():
-        raise RuntimeError(f"system-audio helper source missing: {_SRC}")
-    if not (force or _needs_build()):
+        raise RuntimeError(f"audio helper source missing: {_SRC}")
+    if not (force or _needs_build(_SRC, _BINARY)):
         return _BINARY
 
     swiftc = swiftc_path()
@@ -79,16 +91,16 @@ def helper_path(force: bool = False) -> Path:
     )
     if proc.returncode != 0 or not _BINARY.exists():
         raise RuntimeError(
-            "Failed to compile the system-audio helper:\n" + (proc.stderr or proc.stdout)
+            f"Failed to compile {_SRC.name}:\n" + (proc.stderr or proc.stdout)
         )
-    _sign(_BINARY)
+    _sign(_BINARY, f"net.cubedpixels.meetre.{_BINARY.name}")
     return _BINARY
 
 
 _IDENTITY = "meetre Local Signing"
 
 
-def _sign(binary: Path) -> None:
+def _sign(binary: Path, identifier: str = "net.cubedpixels.meetre.syscap") -> None:
     """Sign with the stable local identity (mac/Scripts/signing-identity.sh)
     when it exists — an ad-hoc signature changes with every compile, which
     makes macOS forget the capture permission. Best-effort."""
@@ -97,7 +109,7 @@ def _sign(binary: Path) -> None:
                              capture_output=True, timeout=10).returncode == 0
         if has:
             subprocess.run(["/usr/bin/codesign", "--force", "--sign", _IDENTITY,
-                            "--identifier", "net.cubedpixels.meetre.syscap", str(binary)],
+                            "--identifier", identifier, str(binary)],
                            capture_output=True, timeout=30)
     except Exception:  # noqa: BLE001
         pass

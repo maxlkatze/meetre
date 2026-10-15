@@ -15,8 +15,9 @@ once on first use and are cached for the process.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 _SR = 16_000
 _vad_model = None
@@ -59,6 +60,29 @@ def speech_regions(audio_path) -> List[tuple]:
         return [(float(t["start"]), float(t["end"])) for t in ts]
     except Exception:  # noqa: BLE001
         return []
+
+
+_vad_lock = threading.Lock()
+
+
+def speech_regions_array(audio) -> Optional[List[tuple]]:
+    """Speech intervals in a 16 kHz float32 array; None if VAD is unavailable
+    (callers then fall back to not filtering)."""
+    global _vad_model
+    try:
+        import numpy as np
+        import torch
+        from silero_vad import get_speech_timestamps, load_silero_vad
+
+        with _vad_lock:  # one model, shared by live captions and the final pass
+            if _vad_model is None:
+                _vad_model = load_silero_vad()
+            ts = get_speech_timestamps(
+                torch.from_numpy(np.ascontiguousarray(audio, dtype="float32")), _vad_model,
+                sampling_rate=_SR, return_seconds=True)
+        return [(float(t["start"]), float(t["end"])) for t in ts]
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def filter_silence(segments: list, audio_path) -> list:

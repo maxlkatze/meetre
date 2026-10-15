@@ -332,16 +332,25 @@ class _SystemAudioSource:
         return max(0.0, time.monotonic() - self._start_t)
 
     def _watch(self):
+        import sys
+
         assert self._proc is not None and self._proc.stdout is not None
         for line in self._proc.stdout:
             self._log.append(line)
             if line.strip() == "READY":
                 self._ready.set()
+            elif line.strip():
+                print(f"meetre: {self._binary_name}: {line.strip()}", file=sys.stderr, flush=True)
 
-    def start(self):
+    _binary_name = "syscap"
+
+    def _binary(self):
         from . import sysaudio
 
-        binary = sysaudio.helper_path()  # compiles on first use
+        return sysaudio.helper_path()  # compiles on first use
+
+    def start(self):
+        binary = self._binary()
         self._proc = subprocess.Popen(
             [str(binary), str(self.path)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
@@ -367,6 +376,28 @@ class _SystemAudioSource:
         self._proc = None
 
 
+class _VoiceMicSource(_SystemAudioSource):
+    """The microphone through macOS Voice Processing (``miccap`` helper).
+
+    Apple's echo canceller removes what the Mac plays from its speakers — the
+    other side of a call — from the mic. Measured with speakers on: the raw
+    mic re-transcribes the remote sentences word for word; through Voice
+    Processing nothing of them is left. Writes 16 kHz mono and survives
+    device switches (the helper rebuilds itself).
+    """
+
+    _binary_name = "miccap"
+
+    def __init__(self):
+        super().__init__()
+        self.path = Path(tempfile.mktemp(suffix="_meetre_mic_vp.wav"))
+
+    def _binary(self):
+        from . import sysaudio
+
+        return sysaudio.mic_helper_path()
+
+
 class Recorder:
     """Records mic + system audio concurrently and mixes to one 16 kHz file.
 
@@ -381,6 +412,7 @@ class Recorder:
         mic_device: Optional[int] = None,
         system_device: Optional[int] = None,
         native_system: bool = False,
+        echo_cancellation: bool = False,
     ):
         if mic_device is None and system_device is None and not native_system:
             raise ValueError("At least one audio source is required")
@@ -388,8 +420,13 @@ class Recorder:
         # Mark which sources are essential — if a non-essential source (system
         # audio) fails to start, we keep recording the rest rather than abort.
         self._essential: list = []
+        self._mic_device = mic_device
         if mic_device is not None:
-            src = _Source(mic_device)
+            # Voice Processing always uses the system's default input, so it
+            # only replaces the plain capture when that's the device in use.
+            default = default_input_device()
+            src = (_VoiceMicSource() if echo_cancellation and mic_device == default
+                   else _Source(mic_device))
             src.role = "mic"
             self._sources.append(src)
             self._essential.append(True)
@@ -419,7 +456,16 @@ class Recorder:
         started: list = []
         for src, essential in zip(self._sources, self._essential):
             try:
-                src.start()
+                try:
+                    src.start()
+                except Exception as e:  # noqa: BLE001
+                    if not isinstance(src, _VoiceMicSource):
+                        raise
+                    # Voice Processing unavailable: plain capture instead.
+                    self.start_errors.append(f"echo cancellation unavailable ({e}); using the plain microphone")
+                    src = _Source(self._mic_device)
+                    src.role = "mic"
+                    src.start()
                 started.append(src)
             except Exception as e:  # noqa: BLE001
                 if essential:

@@ -96,6 +96,9 @@ class Config:
     # expands them. (Replaces live_transcript_minimized, which defaulted to
     # expanded — a new key so saved configs pick up the new default.)
     live_transcript_expanded: bool = False
+    # Record the mic through macOS Voice Processing (Apple's echo canceller):
+    # with speakers on, the call isn't picked up again by the mic.
+    echo_cancellation: bool = True
     summary_overlay_expanded: bool = False
     # After speaker detection, let the local LLM read the transcript for
     # explicit name evidence ("Thanks, Anna …") and replace "Speaker 2" with

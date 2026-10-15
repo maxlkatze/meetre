@@ -195,6 +195,35 @@ def meeting_full(path: Path) -> Dict[str, Any]:
 BUSY_FILE = Path(os.path.expanduser("~/.cache/meetre/busy"))
 
 
+class _StayAwake:
+    """Keeps the display and Mac awake while recording (``caffeinate``).
+
+    System audio comes through ScreenCaptureKit, which needs an active
+    display: with the default 2-minute display sleep, just *listening* in a
+    call long enough would silently stop capturing the other side. Tied to
+    the engine's pid, so it can't outlive a crashed engine."""
+
+    def __init__(self):
+        self._proc = None
+
+    def on(self) -> None:
+        if self._proc is None or self._proc.poll() is not None:
+            try:
+                self._proc = subprocess.Popen(
+                    ["/usr/bin/caffeinate", "-d", "-i", "-w", str(os.getpid())],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self._proc = None
+
+    def off(self) -> None:
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+        self._proc = None
+
+
+_awake = _StayAwake()
+
+
 def _mark_busy(on: bool, what: str = "") -> None:
     try:
         if on:
@@ -484,6 +513,7 @@ class Engine:
             self._recorder = recorder
             self._rec_meta = (label, started, tmp_wav, not name)
         _mark_busy(True, f"recording {label}")
+        _awake.on()
         _log(f"record.start: {label!r} sources={[getattr(s, 'role', '?') for s in recorder._sources]} "
              f"live={self.cfg.live_transcript} errors={recorder.start_errors}")
         self._set(state="recording", stage=None, progress=None, progress_label=None,
@@ -520,6 +550,7 @@ class Engine:
             recorder, (title, started, _tmp, auto_title) = self._recorder, self._rec_meta
             self._since = time.monotonic()
         _log(f"record.stop after {recorder.seconds:.0f}s")
+        _awake.off()
         self._stop_live()
         self._set(state="processing", stage="Finishing recording…")
         threading.Thread(target=self._process, args=(recorder, title, started, auto_title),
@@ -549,6 +580,7 @@ class Engine:
             self._rec_meta = None
         self._stop_live()
         _mark_busy(False)
+        _awake.off()
         try:
             out = recorder.stop()
             for p in [out, tmp_wav, *getattr(recorder, "stems", {}).values()]:
