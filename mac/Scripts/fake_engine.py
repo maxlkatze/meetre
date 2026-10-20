@@ -228,6 +228,10 @@ def handle(method, p):
                                                                     "summary": next(m for m in MEETINGS if m["id"] == p["id"])})),
                          daemon=True).start()
         return {}
+    if method == "meetings.retranscribe":
+        notify("meeting.updated", {"id": p["id"], "stage": "done",
+                                   "summary": next(m for m in MEETINGS if m["id"] == p["id"])})
+        return {}
     if method == "meetings.rename":
         m = next(x for x in MEETINGS if x["id"] == p["id"])
         m["title"] = p["title"]

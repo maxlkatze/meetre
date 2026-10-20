@@ -24,7 +24,6 @@ post-recording pass with diarization.
 
 from __future__ import annotations
 
-import re
 import threading
 import time
 from typing import Callable, List, Optional
@@ -39,16 +38,10 @@ COMMIT_AFTER = 10.0    # once the window is this long, commit all but the last s
 MAX_WINDOW = 25.0      # hard cap: commit everything
 SILENCE_RMS = 0.004    # window quieter than this is skipped, not decoded
 PROMPT_CHARS = 200     # committed-text tail used as Whisper's prompt
-ECHO_WINDOW = 12.0     # seconds: mic text repeating system text this close is echo
-ECHO_OVERLAP = 0.6     # share of a mic segment's words found in the system text
 
 
 def _rms(a) -> float:
     return float(np.sqrt(np.mean(a * a))) if len(a) else 0.0
-
-
-def _words(text: str) -> List[str]:
-    return re.findall(r"\w+", text.lower())
 
 
 class _Stream:
@@ -179,16 +172,11 @@ class LiveTranscriber:
         """A mic segment that repeats the call (speakers → mic) — drop it."""
         if s.role != "mic":
             return False
-        words = _words(text)
-        if len(words) < 2:
-            return False
-        nearby = [t for st in self._streams if st.role == "system"
-                  for t0, t in [(c[0], c[2]) for c in self._committed] + st.tentative
-                  if abs(t0 - start) < ECHO_WINDOW]
-        if not nearby:
-            return False
-        heard = set(_words(" ".join(nearby)))
-        return sum(w in heard for w in words) / len(words) >= ECHO_OVERLAP
+        from .attribution import is_echo
+
+        system = [(c[0], c[2]) for c in self._committed] + \
+            [t for st in self._streams if st.role == "system" for t in st.tentative]
+        return is_echo(text, start, system)
 
     def _commit(self, s: _Stream, segs) -> None:
         for seg in segs:

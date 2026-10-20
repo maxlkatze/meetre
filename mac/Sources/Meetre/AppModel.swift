@@ -294,6 +294,11 @@ final class AppModel {
         perform("meetings.summarize", ["id": .string(id)])
     }
 
+    func transcribeAgain() {
+        guard let id = selectedID else { return }
+        perform("meetings.retranscribe", ["id": .string(id)])
+    }
+
     func rename(_ id: String, to title: String) {
         let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }

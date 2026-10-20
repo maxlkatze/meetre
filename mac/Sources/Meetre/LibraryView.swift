@@ -166,6 +166,7 @@ struct MeetingDetail: View {
         Binding(get: { DetailTab(rawValue: tabRaw) ?? .summary }, set: { tabRaw = $0.rawValue })
     }
     @State private var confirmDelete = false
+    @State private var confirmRetranscribe = false
 
     var body: some View {
         let owners = meeting.sections?.tasks?.compactMap(\.owner) ?? []
@@ -207,6 +208,11 @@ struct MeetingDetail: View {
                 .help("Summarize again (⌘⇧S)")
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(model.summaryStream.active || model.connection != .ready)
+                Button { confirmRetranscribe = true } label: {
+                    Label("Transcribe again", systemImage: "waveform.badge.magnifyingglass")
+                }
+                .help("Transcribe again from the audio backup")
+                .disabled(model.state.state != .idle || model.connection != .ready)
                 Menu {
                     Button("Copy summary as Markdown", action: model.copySummary)
                     Button("Open in Apple Notes") { model.openNote(meeting.id) }
@@ -221,6 +227,11 @@ struct MeetingDetail: View {
         }
         .confirmationDialog("Move “\(meeting.title)” to the Trash?", isPresented: $confirmDelete) {
             Button("Move to Trash", role: .destructive) { model.delete(meeting.id) }
+        }
+        .confirmationDialog("Transcribe “\(meeting.title)” again?", isPresented: $confirmRetranscribe) {
+            Button("Transcribe again", action: model.transcribeAgain)
+        } message: {
+            Text("The transcript and summary are replaced with a fresh pass over the audio backup.")
         }
         .onAppear { title = meeting.title }
     }

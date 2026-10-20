@@ -650,6 +650,34 @@ class Engine:
         threading.Thread(target=work, daemon=True, name="meetre-summarize").start()
         return {}
 
+    def m_meetings_retranscribe(self, id: str) -> dict:
+        from .pipeline import Pipeline
+
+        path = self._path(id)
+        with self._slock:
+            if self.state != "idle":
+                raise RPCError(f"Busy ({self.state}) — try again when it's done.")
+            self._since = time.monotonic()
+        self._set(state="processing", stage="Transcribing…", title=meeting_summary(path)["title"])
+
+        def work():
+            hooks = _EngineHooks(self, meeting_id=id)
+            try:
+                new = Pipeline(self.cfg, hooks).retranscribe(path)
+                self.event("meeting.updated", {"id": new.stem, "previous_id": id,
+                                               "stage": "done",
+                                               "summary": meeting_summary(new)})
+            except Exception as e:  # noqa: BLE001
+                print(traceback.format_exc(), file=sys.stderr)
+                self.event("error", {"message": "Transcribing again failed",
+                                     "hint": str(e)})
+            finally:
+                self._set(state="idle", stage=None, progress=None, progress_label=None,
+                          title=None)
+
+        threading.Thread(target=work, daemon=True, name="meetre-retranscribe").start()
+        return {}
+
     def m_meetings_rename(self, id: str, title: str) -> dict:
         from .transcript import _slugify
 

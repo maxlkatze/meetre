@@ -99,6 +99,17 @@ def begin_recording(cfg, path: Path):
     return recorder
 
 
+def save_stems(stems: dict, mp3: Path) -> None:
+    """Keep each source's 16 kHz stem next to the MP3 backup as
+    ``<backup>.<role>.flac`` (lossless, so they stay sample-aligned)."""
+    import soundfile as sf
+
+    for role, stem in stems.items():
+        if role in ("mic", "system") and Path(stem).exists():
+            data, sr = sf.read(str(stem), dtype="float32", always_2d=False)
+            sf.write(str(mp3.with_suffix(f".{role}.flac")), data, sr, format="FLAC")
+
+
 def embed_summary(path: Path, summary: str) -> None:
     """Insert or replace the summary section of a transcript .md in place.
 
@@ -173,6 +184,9 @@ class Pipeline:
             try:
                 mp3 = cfg.audio_backup_path / f"{started.strftime('%Y-%m-%d_%H-%M-%S')}_{_slugify(title)}.mp3"
                 rec.save_mp3(final_audio, mp3)
+                # Per-source audio (lossless, sample-aligned) so the meeting
+                # can be transcribed again with you vs. the call kept apart.
+                save_stems(stems, mp3)
             except Exception:  # noqa: BLE001
                 import sys
 
@@ -204,52 +218,8 @@ class Pipeline:
                              "Speakers and summary follow; the transcript updates itself."
                              if pending else out["path"].name)
 
-            source_aware = "mic" in stems and "system" in stems
-            if source_aware:
-                # One transcription of the mix (clean timing); attribute each
-                # segment to you vs. remote from the separated stems.
-                hooks.stage("Transcribing…")
-
-                def on_transcribed(segs):
-                    out["backend"] = transcriber.available_backend()
-                    early(segs, True)
-                    if use_persons:
-                        hooks.stage("Detecting speakers…")
-
-                segments, backend = transcriber.transcribe_attributed(
-                    final_audio, stems, model=cfg.model, language=cfg.language,
-                    compute_type=cfg.compute_type, detect_speakers=use_persons,
-                    hf_token=cfg.hf_token, num_speakers=cfg.num_speakers,
-                    min_speakers=cfg.min_speakers, max_speakers=cfg.max_speakers,
-                    progress=self.tx_progress, diar_progress=hooks.progress,
-                    vad=cfg.vad, word_align=cfg.word_timestamps,
-                    merged_analysis=cfg.merged_analysis,
-                    on_transcribed=on_transcribed,
-                )
-                use_persons = True
-            else:
-                hooks.stage("Transcribing…")
-                segments, backend = transcriber.transcribe(
-                    final_audio, model=cfg.model, language=cfg.language,
-                    compute_type=cfg.compute_type, progress=self.tx_progress,
-                    vad=cfg.vad, word_align=cfg.word_timestamps,
-                )
-                if segments:
-                    out["backend"] = backend
-                    early(segments, False)
-                if segments and use_persons:
-                    hooks.stage("Detecting speakers…")
-                    try:
-                        segments = transcriber.diarize(
-                            final_audio, segments, cfg.hf_token,
-                            num_speakers=cfg.num_speakers,
-                            min_speakers=cfg.min_speakers,
-                            max_speakers=cfg.max_speakers,
-                            progress=hooks.progress,
-                        )
-                    except RuntimeError as e:
-                        hooks.notify("meetre", "Speaker detection skipped", str(e))
-                        use_persons = False
+            segments, backend, use_persons = self.transcribe_audio(
+                final_audio, stems, on_early=early)
             if not segments:
                 from . import crashlog
 
@@ -302,6 +272,59 @@ class Pipeline:
             crashlog._write_exception("Recording failed", *sys.exc_info())
             hooks.notify("meetre", "Recording failed", str(e))
             return None
+
+    def transcribe_audio(self, mix: Path, stems: dict, on_early=None):
+        """Transcribe a recording, splitting speakers when person detection is
+        on. Returns ``(segments, backend, persons)``.
+
+        With both stems, each source is transcribed on its own (you vs. the
+        call); otherwise the mix is transcribed and pyannote labels it.
+        ``on_early(segments, persons)`` gets the transcript before the slow
+        speaker analysis."""
+        from . import transcriber
+
+        cfg, hooks = self.cfg, self.hooks
+        use_persons = cfg.person_detection
+        hooks.stage("Transcribing…")
+        if "mic" in stems and "system" in stems:
+            def on_transcribed(segs):
+                if on_early is not None:
+                    on_early(segs, True)
+                if use_persons:
+                    hooks.stage("Detecting speakers…")
+
+            segments, backend = transcriber.transcribe_attributed(
+                mix, stems, model=cfg.model, language=cfg.language,
+                compute_type=cfg.compute_type, detect_speakers=use_persons,
+                hf_token=cfg.hf_token, num_speakers=cfg.num_speakers,
+                min_speakers=cfg.min_speakers, max_speakers=cfg.max_speakers,
+                progress=self.tx_progress, diar_progress=hooks.progress,
+                vad=cfg.vad, word_align=cfg.word_timestamps,
+                merged_analysis=cfg.merged_analysis,
+                on_transcribed=on_transcribed,
+            )
+            return segments, backend, True
+        segments, backend = transcriber.transcribe(
+            mix, model=cfg.model, language=cfg.language,
+            compute_type=cfg.compute_type, progress=self.tx_progress,
+            vad=cfg.vad, word_align=cfg.word_timestamps,
+        )
+        if segments and on_early is not None:
+            on_early(segments, False)
+        if segments and use_persons:
+            hooks.stage("Detecting speakers…")
+            try:
+                segments = transcriber.diarize(
+                    mix, segments, cfg.hf_token,
+                    num_speakers=cfg.num_speakers,
+                    min_speakers=cfg.min_speakers,
+                    max_speakers=cfg.max_speakers,
+                    progress=hooks.progress,
+                )
+            except RuntimeError as e:
+                hooks.notify("meetre", "Speaker detection skipped", str(e))
+                use_persons = False
+        return segments, backend, use_persons
 
     def publish(self, out, segments, persons, *, summary="", pending=None,
                 stage="done") -> None:
@@ -480,3 +503,79 @@ class Pipeline:
         self.hooks.stage("Saving…")
         embed_summary(path, summary)
         return summary
+
+    def retranscribe(self, path: Path) -> Path:
+        """Transcribe a saved meeting again from its audio backup and rewrite
+        the .md in place (same title; fresh speakers and, with auto-summarize,
+        a fresh summary). Uses the per-source stems when they were kept, else
+        the mixed MP3. Raises on failure; returns the transcript path."""
+        import tempfile
+
+        import numpy as np
+        import soundfile as sf
+
+        from . import summarizer, transcriber
+        from .transcript import write_transcript
+
+        cfg = self.cfg
+        md = path.read_text()
+        title, _ = summarizer.meeting_meta(md)
+        stamp = path.stem[:19]
+        try:
+            started = datetime.strptime(stamp, "%Y-%m-%d_%H-%M-%S")
+        except ValueError:
+            raise RuntimeError("Can't tell when this meeting was recorded.")
+        backup = cfg.audio_backup_path
+        found = {role: next(iter(sorted(backup.glob(f"{stamp}_*.{role}.flac"))), None)
+                 for role in ("mic", "system")}
+        found = {r: p for r, p in found.items() if p is not None}
+        mp3 = next(iter(sorted(backup.glob(f"{stamp}_*.mp3"))), None)
+        if not found and mp3 is None:
+            raise RuntimeError("No audio backup for this meeting.")
+
+        self.hooks.stage("Loading transcription model…")
+        _tx_label = "Parakeet" if transcriber.is_parakeet(cfg.model) else "Whisper"
+        self.ensure_model(transcriber.mlx_repo(cfg.model), f"{_tx_label} {cfg.model}")
+        with tempfile.TemporaryDirectory(prefix="meetre_retx_") as tmp:
+            tmp = Path(tmp)
+            stems, tracks = {}, []
+            for role, src in (found.items() if found else [("mix", mp3)]):
+                data, sr = sf.read(str(src), dtype="float32", always_2d=False)
+                if data.ndim > 1:
+                    data = data.mean(axis=1)
+                if sr != 16_000 and len(data):
+                    n = int(round(len(data) * 16_000 / sr))
+                    data = np.interp(np.linspace(0, len(data), n, endpoint=False),
+                                     np.arange(len(data)), data).astype("float32")
+                wav = tmp / f"{role}.wav"
+                sf.write(str(wav), data, 16_000, subtype="PCM_16")
+                if role != "mix":
+                    stems[role] = wav
+                tracks.append(data)
+            mix = tmp / "mix.wav"
+            if stems:
+                out = np.zeros(max(len(t) for t in tracks), dtype="float32")
+                for t in tracks:
+                    out[: len(t)] += t
+                peak = float(np.max(np.abs(out))) if len(out) else 0.0
+                if peak > 1.0:
+                    out /= peak
+                sf.write(str(mix), out, 16_000, subtype="PCM_16")
+            else:
+                sf.write(str(mix), tracks[0], 16_000, subtype="PCM_16")
+            duration = max(len(t) for t in tracks) / 16_000
+            segments, backend, persons = self.transcribe_audio(mix, stems)
+        if not segments:
+            raise RuntimeError("No speech detected in the audio backup.")
+        if persons:
+            self.name_speakers(segments)
+        summary = self.generate_summary(segments) if cfg.auto_summarize \
+            else summarizer.extract_summary(md) or ""
+        self.hooks.stage("Saving…")
+        new = write_transcript(
+            segments, cfg.transcripts_path, title=title or path.stem,
+            started_at=started, duration=duration, model=cfg.model,
+            backend=backend or "?", person_detection=persons, summary=summary)
+        if new != path:
+            path.unlink(missing_ok=True)
+        return new

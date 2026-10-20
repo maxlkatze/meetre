@@ -411,12 +411,17 @@ def transcribe_attributed(
     merged_analysis: bool = False,
     on_transcribed=None,
 ) -> Tuple[List[Segment], str]:
-    """Transcribe the mixed audio once, then attribute speakers from the stems.
+    """Transcribe each source on its own, then split each side into people.
 
-    Timing comes from a single transcription of the mix (one clean timeline).
-    Each segment is attributed to a side by comparing energy in the mic stem
-    (you) vs the system stem (remote) over the segment window — the stems are
-    sample-aligned with the mix.
+    The mic stem (you) and the system stem (the call) are transcribed
+    separately — like the live captions — so every segment's side is simply
+    its source. Comparing stem energies on a single transcription of the mix
+    did not work: the call stem is digital silence between words, so its
+    "noise floor" is ~0 and it out-shouts the mic on nearly every frame. Mic
+    segments are kept only where VAD hears speech, and mic segments that repeat
+    what the call said at about the same time (speakers → mic echo) are dropped.
+    The stems are sample-aligned with the mix, so their timings share one
+    timeline.
 
     With ``detect_speakers`` and ``merged_analysis=False``, pyannote runs on each
     stem separately so multiple local AND multiple remote speakers are split
@@ -436,11 +441,6 @@ def transcribe_attributed(
     """
     import numpy as np
     import soundfile as sf
-
-    segments, backend = transcribe(mix_path, model, language, compute_type,
-                                   progress=progress, vad=vad, word_align=word_align)
-    if not segments:
-        return segments, backend
 
     lbl = _labels(language)
 
@@ -467,15 +467,44 @@ def transcribe_attributed(
     if _silent(system):
         system = None
 
-    # 1) Attribute every WORD to a side (you vs. remote) from the stems —
-    #    each normalised to its own noise floor, with the call's echo on the
-    #    mic subtracted — and split segments where the speaker changes. With
-    #    one side skipped (silent), everything falls to the side that recorded.
-    from .attribution import split_by_side
+    # 1) Who spoke: each source is transcribed as its own stream, so a
+    #    segment's side is its source. With one side silent, the mix is
+    #    transcribed and everything falls to the side that recorded.
+    if mic is not None and system is not None:
+        from .align import speech_regions_array
+        from .attribution import drop_echo
 
-    segments = split_by_side(segments, mic, system, lbl["local"], lbl["remote"])
-    mic_segs = [s for s in segments if s.speaker == lbl["local"]]
-    sys_segs = [s for s in segments if s.speaker == lbl["remote"]]
+        def _part(k):  # progress of source k (of 2) as one overall bar
+            if progress is None:
+                return None
+            return lambda done, total: progress(k * total + done, 2 * total)
+
+        sys_segs, backend = transcribe(Path(stems["system"]), model, language, compute_type,
+                                       progress=_part(0), vad=vad, word_align=word_align)
+        mic_segs, backend = transcribe(Path(stems["mic"]), model, language, compute_type,
+                                       progress=_part(1), vad=vad, word_align=word_align)
+        # The mic has faint residual sound that ASR happily "hears" words in;
+        # keep only segments where VAD finds speech (as the live captions do).
+        regions = speech_regions_array(mic)
+        if regions is not None:
+            mic_segs = [g for g in mic_segs
+                        if any(min(g.end, e) - max(g.start, b) > 0.1 for b, e in regions)]
+        mic_segs = drop_echo(mic_segs, sys_segs)
+        for s in sys_segs:
+            s.speaker = lbl["remote"]
+        for s in mic_segs:
+            s.speaker = lbl["local"]
+        segments = sorted(sys_segs + mic_segs, key=lambda s: (s.start, s.end))
+    else:
+        segments, backend = transcribe(mix_path, model, language, compute_type,
+                                       progress=progress, vad=vad, word_align=word_align)
+        label = lbl["remote"] if mic is None else lbl["local"]
+        for s in segments:
+            s.speaker = label
+        mic_segs = segments if mic is not None else []
+        sys_segs = segments if mic is None else []
+    if not segments:
+        return segments, backend
     if on_transcribed is not None:
         on_transcribed(segments)
 
