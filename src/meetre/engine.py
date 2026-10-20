@@ -678,6 +678,39 @@ class Engine:
         threading.Thread(target=work, daemon=True, name="meetre-retranscribe").start()
         return {}
 
+    def m_backups_list(self) -> list:
+        from .pipeline import orphan_backups
+
+        return orphan_backups(self.cfg)
+
+    def m_meetings_import(self, path: str) -> dict:
+        from .pipeline import Pipeline
+
+        src = Path(path or "").expanduser()
+        if not src.is_file():
+            raise RPCError(f"File not found: {path}", -32602)
+        with self._slock:
+            if self.state != "idle":
+                raise RPCError(f"Busy ({self.state}) — try again when it's done.")
+            self._since = time.monotonic()
+        self._set(state="processing", stage="Transcribing…", title=src.name)
+
+        def work():
+            hooks = _EngineHooks(self)
+            try:
+                Pipeline(self.cfg, hooks).import_audio(src)
+                self.event("backups.changed", {})
+            except Exception as e:  # noqa: BLE001
+                print(traceback.format_exc(), file=sys.stderr)
+                self.event("error", {"message": "Importing audio failed",
+                                     "hint": str(e)})
+            finally:
+                self._set(state="idle", stage=None, progress=None, progress_label=None,
+                          title=None)
+
+        threading.Thread(target=work, daemon=True, name="meetre-import").start()
+        return {}
+
     def m_meetings_rename(self, id: str, title: str) -> dict:
         from .transcript import _slugify
 

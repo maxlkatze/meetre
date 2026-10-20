@@ -53,6 +53,18 @@ enum Formatting {
     }
 
     /// Metadata line: "Wednesday, 15 October 10:46 · 31 min · 3 speakers".
+    /// "20 Oct, 11:45" — fits a sidebar row.
+    static func shortDayAndTime(_ date: Date?) -> String {
+        guard let date else { return "" }
+        return date.formatted(.dateTime.day().month(.abbreviated).hour().minute())
+    }
+
+    /// "14 MB"
+    static func size(_ bytes: Int?) -> String {
+        guard let bytes else { return "" }
+        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
     static func meta(date: Date?, duration: Double?, speakers: Int) -> String {
         var parts = [dayAndTime(date), Self.duration(duration)].filter { !$0.isEmpty && $0 != "–" }
         if speakers > 0 { parts.append(speakers == 1 ? "1 speaker" : "\(speakers) speakers") }

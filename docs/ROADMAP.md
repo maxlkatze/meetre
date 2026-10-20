@@ -82,6 +82,9 @@ Errors: `{"id":1,"error":{"code":-32000,"message":"…","data":{"hint":"…"}}}`
 | `meetings.list` | `{query?: str}` | `[MeetingSummary]` newest first |
 | `meetings.get` | `{id}` | `Meeting` |
 | `meetings.summarize` | `{id}` | `{}`; streams `summary.stream`, ends with `meeting.updated` |
+| `meetings.retranscribe` | `{id}` | `{}`; re-runs the pipeline on the audio backup, ends with `meeting.updated` |
+| `meetings.import` | `{path}` | `{}`; transcribes an audio file (orphaned backup or any MP3/WAV/…) into a new meeting, ends with `meeting.updated` + `backups.changed` |
+| `backups.list` | – | `[{path, name, started_at, size, stems:[str]}]` audio backups without a transcript, newest first |
 | `meetings.rename` | `{id, title}` | `MeetingSummary` |
 | `meetings.delete` | `{id}` | `{}` (moves file to Trash) |
 | `meetings.reveal` | `{id}` | `{}` (Finder) |
@@ -106,6 +109,7 @@ Errors: `{"id":1,"error":{"code":-32000,"message":"…","data":{"hint":"…"}}}`
 | `summary.stream` | `{meeting_id?, phase: "thinking"|"writing"|"done", text, stage}` |
 | `chat.delta` | `{text}` (full text so far) |
 | `meeting.updated` | `{id, stage: "transcript"|"speakers"|"summary"|"done", summary: MeetingSummary}` |
+| `backups.changed` | `{}` — refetch `backups.list` |
 | `call` | `{event: "started"|"ended"}` (Teams call detection) |
 | `notify` | `{title, subtitle, body}` (app decides whether to post a notification) |
 | `error` | `{message, hint}` |

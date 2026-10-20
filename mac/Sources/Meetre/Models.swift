@@ -84,6 +84,18 @@ struct MeetingSummary: Codable, Sendable, Identifiable, Hashable {
     var date: Date? { startedAt.flatMap(Formatting.parseISO) }
 }
 
+/// An audio backup with no transcript (the meeting failed or was deleted).
+struct AudioBackup: Codable, Sendable, Identifiable, Hashable {
+    var path: String
+    var name: String
+    var startedAt: String?
+    var size: Int?
+    var stems: [String]?
+
+    var id: String { path }
+    var date: Date? { startedAt.flatMap(Formatting.parseISO) }
+}
+
 struct MeetingTask: Codable, Sendable, Hashable {
     var text: String
     var owner: String?

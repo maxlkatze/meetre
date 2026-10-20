@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 
 def summary_error_hint(e: Exception) -> str:
@@ -129,6 +129,74 @@ def embed_summary(path: Path, summary: str) -> None:
     tmp = path.with_suffix(".md.tmp")
     tmp.write_text(f"{meta.rstrip()}\n\n---\n\n{summary}\n\n---\n\n## Transcript\n\n{body}\n")
     tmp.replace(path)
+
+
+def backup_stamp(name: str) -> Optional[datetime]:
+    """The recording start encoded in a backup's name
+    (``2026-10-13_14-01-59_<slug>.mp3``), or None."""
+    try:
+        return datetime.strptime(name[:19], "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return None
+
+
+def backup_stems(mp3: Path) -> dict:
+    """The per-source stems saved next to ``mp3`` by :func:`save_stems`
+    (empty unless both are there — one alone misses half the meeting)."""
+    stems = {role: mp3.with_suffix(f".{role}.flac") for role in ("mic", "system")}
+    return stems if all(p.exists() for p in stems.values()) else {}
+
+
+def decode_sources(tmp: Path, sources: dict):
+    """Decode ``{role: audio file}`` (``mic``/``system`` stems, or one ``mix``)
+    to 16 kHz WAVs in ``tmp``. Returns ``(mix_wav, stem_wavs, seconds)``."""
+    import numpy as np
+    import soundfile as sf
+
+    stems, tracks = {}, []
+    for role, src in sources.items():
+        data, sr = sf.read(str(src), dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if sr != 16_000 and len(data):
+            n = int(round(len(data) * 16_000 / sr))
+            data = np.interp(np.linspace(0, len(data), n, endpoint=False),
+                             np.arange(len(data)), data).astype("float32")
+        wav = tmp / f"{role}.wav"
+        sf.write(str(wav), data, 16_000, subtype="PCM_16")
+        if role != "mix":
+            stems[role] = wav
+        tracks.append(data)
+    mix = tmp / "mix.wav"
+    if stems:
+        out = np.zeros(max(len(t) for t in tracks), dtype="float32")
+        for t in tracks:
+            out[: len(t)] += t
+        peak = float(np.max(np.abs(out))) if len(out) else 0.0
+        if peak > 1.0:
+            out /= peak
+        sf.write(str(mix), out, 16_000, subtype="PCM_16")
+    duration = max(len(t) for t in tracks) / 16_000
+    return mix, stems, duration
+
+
+def orphan_backups(cfg) -> List[dict]:
+    """Audio backups without a transcript (the meeting failed, was deleted or
+    never finished), newest first — candidates for :meth:`Pipeline.import_audio`."""
+    backup = cfg.audio_backup_path
+    if not backup.is_dir():
+        return []
+    root = cfg.transcripts_path
+    have = {p.name[:19] for p in root.glob("*.md")} if root.is_dir() else set()
+    out = []
+    for mp3 in sorted(backup.glob("*.mp3"), reverse=True):
+        started = backup_stamp(mp3.name)
+        if started is None or mp3.name[:19] in have:
+            continue
+        out.append({"path": str(mp3), "name": mp3.name,
+                    "started_at": started.isoformat(timespec="seconds"),
+                    "size": mp3.stat().st_size, "stems": sorted(backup_stems(mp3))})
+    return out
 
 
 class Pipeline:
@@ -511,9 +579,6 @@ class Pipeline:
         the mixed MP3. Raises on failure; returns the transcript path."""
         import tempfile
 
-        import numpy as np
-        import soundfile as sf
-
         from . import summarizer, transcriber
         from .transcript import write_transcript
 
@@ -526,10 +591,10 @@ class Pipeline:
         except ValueError:
             raise RuntimeError("Can't tell when this meeting was recorded.")
         backup = cfg.audio_backup_path
-        found = {role: next(iter(sorted(backup.glob(f"{stamp}_*.{role}.flac"))), None)
-                 for role in ("mic", "system")}
-        found = {r: p for r, p in found.items() if p is not None}
         mp3 = next(iter(sorted(backup.glob(f"{stamp}_*.mp3"))), None)
+        found = backup_stems(mp3) if mp3 else {
+            role: p for role in ("mic", "system")
+            for p in sorted(backup.glob(f"{stamp}_*.{role}.flac"))[:1]}
         if not found and mp3 is None:
             raise RuntimeError("No audio backup for this meeting.")
 
@@ -537,33 +602,7 @@ class Pipeline:
         _tx_label = "Parakeet" if transcriber.is_parakeet(cfg.model) else "Whisper"
         self.ensure_model(transcriber.mlx_repo(cfg.model), f"{_tx_label} {cfg.model}")
         with tempfile.TemporaryDirectory(prefix="meetre_retx_") as tmp:
-            tmp = Path(tmp)
-            stems, tracks = {}, []
-            for role, src in (found.items() if found else [("mix", mp3)]):
-                data, sr = sf.read(str(src), dtype="float32", always_2d=False)
-                if data.ndim > 1:
-                    data = data.mean(axis=1)
-                if sr != 16_000 and len(data):
-                    n = int(round(len(data) * 16_000 / sr))
-                    data = np.interp(np.linspace(0, len(data), n, endpoint=False),
-                                     np.arange(len(data)), data).astype("float32")
-                wav = tmp / f"{role}.wav"
-                sf.write(str(wav), data, 16_000, subtype="PCM_16")
-                if role != "mix":
-                    stems[role] = wav
-                tracks.append(data)
-            mix = tmp / "mix.wav"
-            if stems:
-                out = np.zeros(max(len(t) for t in tracks), dtype="float32")
-                for t in tracks:
-                    out[: len(t)] += t
-                peak = float(np.max(np.abs(out))) if len(out) else 0.0
-                if peak > 1.0:
-                    out /= peak
-                sf.write(str(mix), out, 16_000, subtype="PCM_16")
-            else:
-                sf.write(str(mix), tracks[0], 16_000, subtype="PCM_16")
-            duration = max(len(t) for t in tracks) / 16_000
+            mix, stems, duration = decode_sources(Path(tmp), found or {"mix": mp3})
             segments, backend, persons = self.transcribe_audio(mix, stems)
         if not segments:
             raise RuntimeError("No speech detected in the audio backup.")
@@ -579,3 +618,62 @@ class Pipeline:
         if new != path:
             path.unlink(missing_ok=True)
         return new
+
+    def import_audio(self, src: Path) -> Path:
+        """Turn an audio file into a meeting — an orphaned backup (the meeting
+        failed or was deleted) or any MP3/WAV/FLAC/… from elsewhere.
+
+        A backup keeps its recording time and title and uses its per-source
+        stems when present; other files are backed up first so "Transcribe
+        again" works for them later. Raises on failure; returns the transcript."""
+        import tempfile
+
+        from . import recorder as rec
+        from . import transcriber
+        from .transcript import _slugify
+
+        cfg = self.cfg
+        src = Path(src).expanduser()
+        if not src.is_file():
+            raise RuntimeError(f"File not found: {src}")
+        started = backup_stamp(src.name)
+        backup = cfg.audio_backup_path
+        in_backup = started is not None and src.parent.resolve() == backup.resolve()
+        if started is None:
+            started = datetime.fromtimestamp(src.stat().st_mtime).replace(microsecond=0)
+        default = f"Meeting {started.strftime('%Y-%m-%d %H:%M')}"
+        slug = src.stem[20:] if in_backup else src.stem
+        # A meeting recorded without a name gets a title from its summary.
+        auto_title = slug in ("", "meeting", _slugify(default))
+        if auto_title:
+            title = default
+        elif in_backup:
+            title = slug.replace("-", " ").strip().capitalize()
+        else:
+            title = src.stem
+        sources = backup_stems(src) if in_backup else {}
+
+        self.hooks.stage("Loading transcription model…")
+        _tx_label = "Parakeet" if transcriber.is_parakeet(cfg.model) else "Whisper"
+        self.ensure_model(transcriber.mlx_repo(cfg.model), f"{_tx_label} {cfg.model}")
+        with tempfile.TemporaryDirectory(prefix="meetre_import_") as tmp:
+            try:
+                mix, stems, duration = decode_sources(Path(tmp), sources or {"mix": src})
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(f"Can't read {src.name}: {e}")
+            if not in_backup:
+                stamp = started.strftime("%Y-%m-%d_%H-%M-%S")
+                rec.save_mp3(mix, backup / f"{stamp}_{_slugify(title)}.mp3")
+            segments, backend, persons = self.transcribe_audio(mix, stems)
+        if not segments:
+            raise RuntimeError(f"No speech detected in {src.name}.")
+        if persons:
+            self.name_speakers(segments)
+        summary = self.generate_summary(segments)
+        if auto_title:
+            title = self.generate_title(summary, segments, fallback=title)
+        self.hooks.stage("Saving…")
+        out = {"title": title, "started": started, "duration": duration,
+               "backend": backend, "path": None, "note": None}
+        self.publish(out, segments, persons, summary=summary, stage="done")
+        return out["path"]

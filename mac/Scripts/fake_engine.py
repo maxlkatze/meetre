@@ -32,6 +32,12 @@ def iso(dt):
 
 NOW = datetime.now()
 # Invented demo data (public screenshots / UI work) — never real meetings.
+BACKUPS = [
+    {"path": "/tmp/audio_backup/2026-10-20_11-45-53_meeting-2026-10-20-11-45.mp3",
+     "name": "2026-10-20_11-45-53_meeting-2026-10-20-11-45.mp3",
+     "started_at": "2026-10-20T11:45:53", "size": 14_200_000, "stems": ["mic", "system"]},
+]
+
 MEETINGS = [
     {"id": "roadmap", "title": "Q4 roadmap review",
      "started_at": iso(NOW.replace(hour=9, minute=30)), "duration": 1712,
@@ -231,6 +237,13 @@ def handle(method, p):
     if method == "meetings.retranscribe":
         notify("meeting.updated", {"id": p["id"], "stage": "done",
                                    "summary": next(m for m in MEETINGS if m["id"] == p["id"])})
+        return {}
+    if method == "backups.list":
+        return BACKUPS
+    if method == "meetings.import":
+        BACKUPS[:] = [b for b in BACKUPS if b["path"] != p["path"]]
+        threading.Thread(target=lambda: (process("Imported meeting"),
+                                         notify("backups.changed", {})), daemon=True).start()
         return {}
     if method == "meetings.rename":
         m = next(x for x in MEETINGS if x["id"] == p["id"])

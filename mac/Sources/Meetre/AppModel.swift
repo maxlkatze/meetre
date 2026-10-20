@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import SwiftUI
+import UniformTypeIdentifiers
 @preconcurrency import UserNotifications
 
 /// The single source of truth for every view. Views never talk to the engine
@@ -30,6 +31,8 @@ final class AppModel {
     private(set) var meeting: Meeting?
     private(set) var loadingMeeting = false
     var query = "" { didSet { if query != oldValue { refreshMeetings() } } }
+    /// Audio backups without a transcript, importable from the sidebar.
+    var backups: [AudioBackup] = []
 
     // Settings
     var config: [String: JSONValue] = [:]
@@ -119,6 +122,7 @@ final class AppModel {
             catalog = (try? await k) ?? Catalog()
             startAtLogin = config["start_at_login"]?.bool ?? false
             refreshMeetings()
+            refreshBackups()
         } catch {
             connection = .failed(error.localizedDescription)
         }
@@ -149,6 +153,7 @@ final class AppModel {
                     let at = Date.now
                     finishedAt = at
                     reachedStep = nil
+                    refreshBackups()  // a failed run leaves its audio behind
                     // The "Done ✓" flash: cleared here, not by a timer in the
                     // menu bar label (that re-render loop pinned the CPU).
                     Task { [weak self] in
@@ -191,6 +196,8 @@ final class AppModel {
             } else {
                 refreshMeetings()
             }
+        case "backups.changed":
+            refreshBackups()
         case "call":
             switch p["event"]?.string {
             case "started" where state.state == .idle: callPrompt = .started(.now)
@@ -318,9 +325,47 @@ final class AppModel {
                 try await engine.call("meetings.delete", ["id": .string(id)])
                 meetings.removeAll { $0.id == id }
                 if selectedID == id { selectedID = meetings.first?.id }
+                refreshBackups()  // its audio is importable again
             } catch { banner = error.localizedDescription }
         }
     }
+
+    // MARK: Import
+
+    func refreshBackups() {
+        guard !fixtures else { return }
+        Task {
+            backups = (try? await engine.call("backups.list", as: [AudioBackup].self)) ?? backups
+        }
+    }
+
+    /// Transcribe an audio file into a new meeting (orphaned backup or any file).
+    func importAudio(_ path: String) {
+        backups.removeAll { $0.path == path }
+        perform("meetings.import", ["path": .string(path)]) { [weak self] in self?.refreshBackups() }
+    }
+
+    /// "Import Audio…": pick a file, starting in the audio backup folder.
+    func chooseAudioToImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Audio"
+        panel.prompt = "Transcribe"
+        panel.message = "Choose a recording to transcribe into a new meeting."
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        if let dir = config["audio_backup_dir"]?.string {
+            panel.directoryURL = URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
+        }
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importAudio(url.path)
+    }
+
+    func revealFile(_ path: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    var canImport: Bool { state.state == .idle && connection == .ready }
 
     func reveal(_ id: String) { perform("meetings.reveal", ["id": .string(id)]) }
     func openNote(_ id: String) { perform("meetings.open_note", ["id": .string(id)]) }

@@ -23,7 +23,11 @@ struct MeetreApp: App {
         .defaultSize(width: 1100, height: 720)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .newItem) {
+                Button("Import Audio…", action: delegate.model.chooseAudioToImport)
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    .disabled(!delegate.model.canImport)
+            }
         }
 
         Settings {

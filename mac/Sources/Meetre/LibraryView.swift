@@ -39,6 +39,7 @@ struct LibraryView: View {
 private struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @State private var pendingDelete: MeetingSummary?
+    @AppStorage("showBackups") private var showBackups = true
 
     var body: some View {
         @Bindable var model = model
@@ -58,6 +59,18 @@ private struct Sidebar: View {
                                 Divider()
                                 // Destructive: always confirm (DESIGN.md §9 Errors).
                                 Button("Move to Trash…", role: .destructive) { pendingDelete = m }
+                            }
+                    }
+                }
+            }
+            if !model.backups.isEmpty && model.query.isEmpty {
+                Section("Not transcribed", isExpanded: $showBackups) {
+                    ForEach(model.backups) { b in
+                        BackupRow(backup: b)
+                            .contextMenu {
+                                Button("Transcribe") { model.importAudio(b.path) }
+                                    .disabled(!model.canImport)
+                                Button("Reveal in Finder") { model.revealFile(b.path) }
                             }
                     }
                 }
@@ -104,6 +117,33 @@ private struct MeetingRow: View {
                     .foregroundStyle(.secondary)
                     .help("Summary ready")
             }
+        }
+        .padding(.vertical, Theme.Space.xxs)
+    }
+}
+
+/// An audio backup without a transcript: "Transcribe" turns it into a meeting.
+private struct BackupRow: View {
+    let backup: AudioBackup
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Theme.Space.s) {
+            VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                Text(Formatting.shortDayAndTime(backup.date))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(Formatting.size(backup.size))
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+            Button("Transcribe") { model.importAudio(backup.path) }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(!model.canImport)
+                .help("Transcribe this recording into a meeting")
         }
         .padding(.vertical, Theme.Space.xxs)
     }

@@ -108,6 +108,10 @@ enum Fixtures {
 
     static func apply(to model: AppModel) {
         model.meetings = meetings
+        model.backups = [AudioBackup(path: "/tmp/audio_backup/2026-10-20_11-45-53_meeting.mp3",
+                                     name: "2026-10-20_11-45-53_meeting.mp3",
+                                     startedAt: "2026-10-20T11:45:53", size: 14_200_000,
+                                     stems: ["mic", "system"])]
         model.config = config
         model.catalog = catalog
         model.selectedID = "prio"

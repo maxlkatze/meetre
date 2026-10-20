@@ -205,7 +205,9 @@ sentence, one fix button). Use alerts only to confirm destructive actions.
 5. Footer: "Open meetre" (⌘O), "Quit".
 
 ### Library window
-- Sidebar: search field, grouped meetings.
+- Sidebar: search field, grouped meetings, then a collapsible "Not
+  transcribed" section listing audio backups without a transcript (each with
+  a "Transcribe" button). File ▸ Import Audio… (⇧⌘I) transcribes any file.
 - Detail: title (editable inline), metadata line, speaker chips, then a
   segmented control **Summary · Transcript · Chat**.
   - Summary: Decisions, Action items (checklist), Open questions as distinct
