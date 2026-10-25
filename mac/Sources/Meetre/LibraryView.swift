@@ -255,6 +255,8 @@ struct MeetingDetail: View {
                 .disabled(model.state.state != .idle || model.connection != .ready)
                 Menu {
                     Button("Copy summary as Markdown", action: model.copySummary)
+                    Button("Copy transcript", action: model.copyTranscript)
+                    Button("Copy summary and transcript as text", action: model.copySummaryAndTranscript)
                     Button("Open in Apple Notes") { model.openNote(meeting.id) }
                     Button("Reveal in Finder") { model.reveal(meeting.id) }
                     Divider()

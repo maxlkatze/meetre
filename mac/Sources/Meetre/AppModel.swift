@@ -201,7 +201,9 @@ final class AppModel {
         case "call":
             switch p["event"]?.string {
             case "started" where state.state == .idle: callPrompt = .started(.now)
-            case "ended" where state.state == .recording: callPrompt = .ended
+            // The call came back (reconnect, rejoin): no longer "ended".
+            case "started": if case .ended = callPrompt { callPrompt = nil }
+            case "ended" where state.state == .recording: callPrompt = .ended(.now)
             default: break
             }
         case "notify":
@@ -374,6 +376,43 @@ final class AppModel {
         guard let md = meeting?.summaryMd, !md.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("# \(meeting?.title ?? "")\n\n\(md)", forType: .string)
+    }
+
+    func copyTranscript() {
+        guard let m = meeting, let text = transcriptText(m) else { return }
+        copy("\(m.title)\n\n\(text)")
+    }
+
+    func copySummaryAndTranscript() {
+        guard let m = meeting else { return }
+        let parts = [m.summaryMd.flatMap { $0.isEmpty ? nil : plainText($0) }, transcriptText(m)]
+            .compactMap { $0 }
+        guard !parts.isEmpty else { return }
+        copy(([m.title] + parts).joined(separator: "\n\n"))
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// "[00:47] Sprecher: …" per turn; nil when there is no transcript.
+    private func transcriptText(_ m: Meeting) -> String? {
+        guard let turns = m.turns, !turns.isEmpty else { return nil }
+        return turns.map { t in
+            let stamp = t.start.map { "[\(Formatting.offset($0))] " } ?? ""
+            let who = t.speaker.map { "\($0): " } ?? ""
+            return stamp + who + t.text
+        }.joined(separator: "\n")
+    }
+
+    /// Summary Markdown as plain text: no heading marks or bold.
+    private func plainText(_ md: String) -> String {
+        md.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            var l = String(line)
+            while l.hasPrefix("#") { l.removeFirst() }
+            return l.replacingOccurrences(of: "**", with: "").trimmingCharacters(in: .whitespaces)
+        }.joined(separator: "\n")
     }
 
     // MARK: Action items

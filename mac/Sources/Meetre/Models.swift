@@ -194,5 +194,5 @@ struct SummaryStream: Sendable, Equatable {
 
 enum CallPrompt: Equatable, Sendable {
     case started(Date)
-    case ended
+    case ended(Date)
 }

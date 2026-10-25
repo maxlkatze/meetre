@@ -395,9 +395,10 @@ def _show_call_prompt(status_item, title: str, message: str, buttons, on_choice)
         lbl.setFont_(NSFont.boldSystemFontOfSize_(13) if bold else NSFont.systemFontOfSize_(12))
         lbl.setFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 18))
         view.addSubview_(lbl)
+        return lbl
 
     text(title, H - PAD - 18, bold=True)
-    text(message, H - PAD - 40)
+    message_lbl = text(message, H - PAD - 40)
 
     ctrl = _prompt_controller_class().alloc().init()
     popover = NSPopover.alloc().init()
@@ -442,6 +443,7 @@ def _show_call_prompt(status_item, title: str, message: str, buttons, on_choice)
 
     ctrl.popover = popover  # keep the popover alive with the controller
     ctrl.close = close
+    ctrl.set_message = message_lbl.setStringValue_
     ctrl.on_choice = choose
 
     btn = status_item.button()
@@ -520,6 +522,7 @@ class MeetreApp(rumps.App if rumps else object):
         self._call_prompt_at = 0.0   # when it was shown (auto-dismiss)
         self._call_ended = False     # set by the call watcher thread
         self._end_prompt = None      # open "stop recording?" popover
+        self._end_prompt_at = 0.0    # when it was shown (auto-stop countdown)
         self._update_available = False   # set by the update-check thread
         self._update_shown = False       # what the icon/menu currently show
         self._restart_requested = False  # "install update & restart" pulled
@@ -935,9 +938,25 @@ class MeetreApp(rumps.App if rumps else object):
                 self._call_ended = True  # retry on the next tick
                 return
             self._end_prompt = ctrl
+            self._end_prompt_at = time.monotonic()
+            self._end_prompt_countdown()
         except Exception:  # noqa: BLE001
             self._post("meetre", "Microsoft Teams call ended",
                        "Still recording — click the meetre icon → Stop to finish.")
+
+    def _end_prompt_countdown(self):
+        """Unanswered end prompt: show the countdown, stop when it runs out
+        (nobody stays at the desk to stop a recording after a call)."""
+        limit = self.cfg.call_end_autostop
+        if self._end_prompt is None or limit <= 0:
+            return
+        left = int(limit - (time.monotonic() - self._end_prompt_at) + 0.999)
+        if left <= 0:
+            self._close_end_prompt()
+            self.on_stop()
+            return
+        self._end_prompt.set_message(
+            f"Stopping and transcribing in {left} s — or keep going.")
 
     def _close_end_prompt(self):
         if self._end_prompt is not None:
@@ -1358,6 +1377,7 @@ class MeetreApp(rumps.App if rumps else object):
         if self._end_prompt is not None and (
                 self.state != "recording" or self._call_watcher.in_call):
             self._close_end_prompt()
+        self._end_prompt_countdown()
         self._spin = (self._spin + 1) % len(SPINNER)
         if self.state == "recording" and self._recorder is not None:
             m, s = divmod(int(self._recorder.seconds), 60)

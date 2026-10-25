@@ -153,19 +153,35 @@ def _teams_running() -> bool:
         return False
 
 
-def teams_call_active() -> bool:
-    """True while Microsoft Teams is capturing from the microphone."""
+def teams_call_state() -> str:
+    """``"call"`` while Teams captures the mic, ``"idle"`` while it is open
+    without doing so, ``"gone"`` once no Teams process is left (quit/crash)."""
     if _ca is None:
-        return False
+        return "gone"
     procs = _process_objects()
     if procs is not None:
-        return any(_get(p, _PROCESS_RUNNING_INPUT, ctypes.c_uint32)
-                   and _is_teams_process(p) for p in procs)
+        present = False
+        for p in procs:
+            if not _is_teams_process(p):
+                continue
+            if _get(p, _PROCESS_RUNNING_INPUT, ctypes.c_uint32):
+                return "call"
+            present = True
+        # Teams registers its audio clients at launch, so an empty list means
+        # it's gone; double-check with AppKit before skipping the grace period.
+        return "idle" if present or _teams_running() else "gone"
     # Fallback (< macOS 14.2): Teams is open and *something* holds the mic.
+    # (Can't see the end while meetre itself records — the grace never runs out
+    # until Teams quits.)
     if not _teams_running():
-        return False
+        return "gone"
     dev = _get(_SYSTEM_OBJECT, _DEFAULT_INPUT_DEVICE, ctypes.c_uint32)
-    return bool(dev and _get(dev, _DEVICE_RUNNING_SOMEWHERE, ctypes.c_uint32))
+    return "call" if dev and _get(dev, _DEVICE_RUNNING_SOMEWHERE, ctypes.c_uint32) else "idle"
+
+
+def teams_call_active() -> bool:
+    """True while Microsoft Teams is capturing from the microphone."""
+    return teams_call_state() == "call"
 
 
 class CallWatcher:
@@ -173,16 +189,19 @@ class CallWatcher:
 
     A call must be seen on ``confirm`` consecutive polls before it counts (so a
     quick mic test doesn't trigger), and must be gone for ``end_grace`` seconds
-    before it counts as ended (so a brief mute/device switch doesn't re-ask).
+    before it counts as ended (so a brief device switch or the reconnect after
+    a network drop doesn't ask) — unless Teams quit, which ends it at once.
+    During a call it polls every ``call_interval`` so the end is noticed quickly.
     Both callbacks run on the watcher thread — hand off to the main thread.
     """
 
     def __init__(self, on_start: Callable[[], None],
                  on_end: Optional[Callable[[], None]] = None, *, interval: float = 3.0,
-                 confirm: int = 2, end_grace: float = 20.0):
+                 call_interval: float = 1.0, confirm: int = 2, end_grace: float = 10.0):
         self.on_start = on_start
         self.on_end = on_end
         self.interval = interval
+        self.call_interval = call_interval
         self.confirm = confirm
         self.end_grace = end_grace
         self.in_call = False
@@ -190,39 +209,44 @@ class CallWatcher:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        if self._thread is None or not self._thread.is_alive():
-            self._stop.clear()
+        # Off → on quickly: the old thread may still be sleeping; it exits on
+        # its own (set) event while a fresh one starts.
+        if self._thread is None or self._stop.is_set() or not self._thread.is_alive():
+            self._stop = threading.Event()
             self.in_call = False
-            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread = threading.Thread(target=self._run, args=(self._stop,),
+                                            daemon=True, name="meetre-callwatch")
             self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self.in_call = False
 
-    def _run(self) -> None:
+    @staticmethod
+    def _fire(cb: Optional[Callable[[], None]]) -> None:
+        if cb is not None:
+            try:
+                cb()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _run(self, stop: threading.Event) -> None:
         seen = 0
         last_seen = 0.0
-        while not self._stop.wait(self.interval):
+        while not stop.wait(self.call_interval if self.in_call else self.interval):
             try:
-                active = teams_call_active()
+                state = teams_call_state()
             except Exception:  # noqa: BLE001
-                active = False
+                state = "idle"
             now = time.monotonic()
-            if active:
+            if state == "call":
                 seen += 1
                 last_seen = now
                 if not self.in_call and seen >= self.confirm:
                     self.in_call = True
-                    try:
-                        self.on_start()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    self._fire(self.on_start)
             else:
                 seen = 0
-                if self.in_call and now - last_seen >= self.end_grace:
+                if self.in_call and (state == "gone" or now - last_seen >= self.end_grace):
                     self.in_call = False
-                    if self.on_end is not None:
-                        try:
-                            self.on_end()
-                        except Exception:  # noqa: BLE001
-                            pass
+                    self._fire(self.on_end)

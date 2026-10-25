@@ -85,6 +85,9 @@ class Config:
     # Menu-bar app: when a Microsoft Teams call starts, pop up from the status
     # item and ask whether to record it.
     detect_calls: bool = True
+    # When that call ends while recording, the "stop?" prompt stops the
+    # recording by itself after this many seconds unless answered. 0 = never.
+    call_end_autostop: int = 60
     # Menu-bar app: stream the summary into a translucent, click-through
     # overlay in the top-right corner while it is being written.
     summary_overlay: bool = True

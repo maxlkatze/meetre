@@ -153,7 +153,15 @@ final class OverlayController {
            model.state.state != .idle || Date.now.timeIntervalSince(at) > 120 {
             model.callPrompt = nil
         }
-        if model.callPrompt == .ended, model.state.state != .recording { model.callPrompt = nil }
+        if case .ended(let at) = model.callPrompt {
+            // Unanswered: stop by itself once the countdown runs out.
+            let limit = cfg["call_end_autostop"]?.double ?? 60
+            if model.state.state != .recording {
+                model.callPrompt = nil
+            } else if limit > 0, Date.now.timeIntervalSince(at) >= limit {
+                model.stopRecording()
+            }
+        }
         let offset: CGFloat = showTranscript ? transcript.panel.frame.height + Theme.Space.s
             : (showSummary ? summary.panel.frame.height + Theme.Space.s : 0)
         if model.callPrompt != nil && !call.isVisible { call.place(height: 112, offset: offset) }
@@ -360,7 +368,9 @@ private struct CallPromptView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let ended = model.callPrompt == .ended
+        let endedAt: Date? = if case .ended(let at) = model.callPrompt { at } else { nil }
+        let ended = endedAt != nil
+        let limit = model.config["call_end_autostop"]?.double ?? 60
         VStack(alignment: .leading, spacing: Theme.Space.m) {
             HStack(spacing: Theme.Space.s) {
                 Image(systemName: ended ? "phone.down" : "phone.arrow.up.right")
@@ -368,9 +378,19 @@ private struct CallPromptView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                     Text(ended ? "Call ended" : "Teams call detected")
                         .font(.headline)
-                    Text(ended ? "Stop the recording and transcribe it?" : "Record and transcribe this call?")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    Group {
+                        if let endedAt, limit > 0 {
+                            TimelineView(.periodic(from: endedAt, by: 1)) { ctx in
+                                let left = max(0, Int((limit - ctx.date.timeIntervalSince(endedAt)).rounded(.up)))
+                                Text("Stopping and transcribing in \(left) s.")
+                                    .monospacedDigit()
+                            }
+                        } else {
+                            Text(ended ? "Stop the recording and transcribe it?" : "Record and transcribe this call?")
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                 }
             }
             HStack {
