@@ -106,6 +106,9 @@ class Config:
     # speaker echo in software instead (live.py). (New key: the earlier
     # `echo_cancellation` defaulted to on and is ignored.)
     voice_processing_mic: bool = False
+    # Folder scanned (recursively) for GGUF summary models, run with
+    # llama.cpp's llama-server; they show up next to the MLX models.
+    gguf_folder: str = "~/models"
     summary_overlay_expanded: bool = False
     # After speaker detection, let the local LLM read the transcript for
     # explicit name evidence ("Thanks, Anna …") and replace "Speaker 2" with

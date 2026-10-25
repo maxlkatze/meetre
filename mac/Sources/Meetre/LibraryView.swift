@@ -486,29 +486,55 @@ private struct TranscriptTab: View {
     @State private var find = ""
     @State private var showFind = false
     @FocusState private var findFocused: Bool
+    @State private var player = TranscriptPlayer()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private struct Group: Identifiable {
         let id: Int
         let speaker: String?
         let start: Double?
         var lines: [String]
+        var words: [Word]?
     }
 
-    private var groups: [Group] {
+    private var allGroups: [Group] {
         var out: [Group] = []
         for t in meeting.turns ?? [] {
             if let last = out.last, last.speaker == t.speaker {
                 out[out.count - 1].lines.append(t.text)
+                if let w = t.words, out[out.count - 1].words != nil {
+                    out[out.count - 1].words! += w
+                } else {
+                    out[out.count - 1].words = nil
+                }
             } else {
-                out.append(Group(id: out.count, speaker: t.speaker, start: t.start, lines: [t.text]))
+                out.append(Group(id: out.count, speaker: t.speaker, start: t.start,
+                                 lines: [t.text], words: t.words))
             }
         }
-        if find.isEmpty { return out }
-        return out.filter { $0.lines.joined(separator: " ").localizedCaseInsensitiveContains(find) }
+        return out
+    }
+
+    private func groups(_ all: [Group]) -> [Group] {
+        if find.isEmpty { return all }
+        return all.filter { $0.lines.joined(separator: " ").localizedCaseInsensitiveContains(find) }
+    }
+
+    /// The turn being heard: the last one that has started.
+    private func active(_ all: [Group]) -> Int? {
+        guard player.url != nil, player.playing || player.time > 0 else { return nil }
+        let t = player.time
+        return all.last(where: { ($0.words?.first?.s ?? $0.start ?? .infinity) <= t + 0.05 })?.id
     }
 
     var body: some View {
+        let all = allGroups
+        let current = active(all)
         VStack(spacing: 0) {
+            if meeting.audio != nil, player.url != nil {
+                PlaybackBar(player: player)
+                Divider()
+            }
             if showFind {
                 HStack(spacing: Theme.Space.s) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -522,23 +548,42 @@ private struct TranscriptTab: View {
                 .padding(.vertical, Theme.Space.s)
                 Divider()
             }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: Theme.Space.l) {
-                    if groups.isEmpty {
-                        EmptyState(symbol: "text.quote",
-                                   text: find.isEmpty ? "No transcript." : "No matches for “\(find)”.")
-                            .padding(.top, Theme.Space.xxl)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: Theme.Space.l) {
+                        let shown = groups(all)
+                        if shown.isEmpty {
+                            EmptyState(symbol: "text.quote",
+                                       text: find.isEmpty ? "No transcript." : "No matches for “\(find)”.")
+                                .padding(.top, Theme.Space.xxl)
+                        }
+                        ForEach(shown) { g in
+                            let start = g.words?.first?.s ?? g.start
+                            TurnView(speaker: g.speaker, start: g.start, text: g.lines.joined(separator: " "),
+                                     words: g.words, now: g.id == current ? player.time : nil,
+                                     color: palette.color(for: g.speaker), highlight: find,
+                                     onPlay: player.url == nil || start == nil ? nil : {
+                                         player.play(from: max(0, start! - 0.15))
+                                     })
+                                .id(g.id)
+                        }
                     }
-                    ForEach(groups) { g in
-                        TurnView(speaker: g.speaker, start: g.start, text: g.lines.joined(separator: " "),
-                                 color: palette.color(for: g.speaker), highlight: find)
+                    .frame(maxWidth: Theme.Layout.readingWidth, alignment: .leading)
+                    .padding(Theme.Space.xl)
+                    .frame(maxWidth: .infinity)
+                }
+                .onChange(of: current) { _, id in
+                    guard let id, player.playing else { return }
+                    if reduceMotion {
+                        proxy.scrollTo(id, anchor: .center)
+                    } else {
+                        withAnimation(Theme.smooth) { proxy.scrollTo(id, anchor: .center) }
                     }
                 }
-                .frame(maxWidth: Theme.Layout.readingWidth, alignment: .leading)
-                .padding(Theme.Space.xl)
-                .frame(maxWidth: .infinity)
             }
         }
+        .task(id: meeting.audio) { player.load(meeting.audio) }
+        .onDisappear { player.stop() }
         .background {
             Button("") { showFind = true; findFocused = true }
                 .keyboardShortcut("f", modifiers: .command)
@@ -547,12 +592,48 @@ private struct TranscriptTab: View {
     }
 }
 
+/// Play/pause, position and scrubber for the meeting's audio backup.
+private struct PlaybackBar: View {
+    let player: TranscriptPlayer
+    @State private var scrub: Double?
+
+    var body: some View {
+        HStack(spacing: Theme.Space.m) {
+            Button(action: player.toggle) {
+                Image(systemName: player.playing ? "pause.fill" : "play.fill")
+                    .frame(width: 16)
+            }
+            .buttonStyle(.borderless)
+            .help(player.playing ? "Pause" : "Play the recording")
+            .keyboardShortcut("p", modifiers: [.command, .option])
+            Text(Formatting.offset(scrub ?? player.time))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Slider(value: Binding(get: { scrub ?? player.time }, set: { scrub = $0 }),
+                   in: 0...max(player.duration, 1)) { editing in
+                if !editing, let s = scrub { player.seek(s); scrub = nil }
+            }
+            .controlSize(.small)
+            .tint(Theme.accent)
+            Text(Formatting.offset(player.duration))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.vertical, Theme.Space.s)
+    }
+}
+
 private struct TurnView: View {
     let speaker: String?
     let start: Double?
     let text: String
+    var words: [Word]? = nil
+    /// The playhead while this turn is being heard, else nil.
+    var now: Double? = nil
     let color: Color
     let highlight: String
+    var onPlay: (() -> Void)? = nil
     @State private var hover = false
 
     var body: some View {
@@ -568,7 +649,17 @@ private struct TurnView: View {
                     Text(Formatting.offset(start))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.tertiary)
+                        .opacity(hover || now != nil ? 1 : 0)
+                    if let onPlay {
+                        Button(action: onPlay) {
+                            Image(systemName: "play.circle.fill")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Theme.accent)
+                        .help("Play from here")
                         .opacity(hover ? 1 : 0)
+                    }
                 }
                 Text(attributed)
                     .lineSpacing(2)
@@ -580,7 +671,25 @@ private struct TurnView: View {
     }
 
     private var attributed: AttributedString {
-        var a = AttributedString(text)
+        var a: AttributedString
+        if let now, let words, !words.isEmpty {
+            // The word being spoken: the last one that has started (held
+            // briefly past its end so the highlight doesn't flicker in gaps).
+            let spoken = words.lastIndex(where: { $0.s <= now + 0.05 })
+            a = AttributedString()
+            for (i, w) in words.enumerated() {
+                var piece = AttributedString(w.w)
+                if i == spoken, now <= w.e + 0.6 {
+                    piece.backgroundColor = Theme.accent.opacity(0.28)
+                } else if let spoken, i > spoken {
+                    piece.foregroundColor = .secondary
+                }
+                if i > 0 { a += AttributedString(" ") }
+                a += piece
+            }
+        } else {
+            a = AttributedString(text)
+        }
         guard !highlight.isEmpty else { return a }
         var range = a.startIndex..<a.endIndex
         while let r = a[range].range(of: highlight, options: .caseInsensitive) {

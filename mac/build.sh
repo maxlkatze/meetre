@@ -59,7 +59,7 @@ PLIST
 
 # A stable local identity (not ad-hoc): macOS privacy permissions are tied to
 # the signature, and an ad-hoc one changes with every build (see the script).
-IDENTITY="$("$(dirname "$0")/Scripts/signing-identity.sh" 2>/dev/null || echo -)"
+IDENTITY="$("$MAC/Scripts/signing-identity.sh" 2>/dev/null || echo -)"
 codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
 # This is a build product, not the installed app: keep it out of Launchpad /
 # Spotlight's app list so only ~/Applications/Meetre.app shows up there.

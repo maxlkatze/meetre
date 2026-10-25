@@ -23,16 +23,14 @@ def _model_dir(repo: str) -> Path:
 
 
 def _pinned_revision(repo: str) -> Optional[str]:
-    """Commit a catalog model is pinned to (see summarizer.ModelSpec.revision)."""
-    try:
-        from .summarizer import model_revision
-
-        return model_revision(repo)
-    except Exception:  # noqa: BLE001
-        return None
+    """Commit an HF-cache model is pinned to (none now: the summary models
+    are GGUF files, pinned in gguf.CATALOG)."""
+    return None
 
 
 def is_cached(repo: str) -> bool:
+    if repo.startswith("gguf:"):  # a local GGUF file: nothing to download
+        return Path(repo[5:]).is_file()
     snaps = _model_dir(repo) / "snapshots"
     rev = _pinned_revision(repo)
     if rev:
@@ -70,6 +68,9 @@ def ensure_model(repo: str, on_progress: Optional[ProgressCB] = None) -> None:
     ``on_progress(fraction, bytes_done, bytes_total)`` is called periodically
     while downloading. Raises if the download fails.
     """
+    if repo.startswith("gguf:"):
+        _ensure_gguf(repo[5:], on_progress)
+        return
     if is_cached(repo):
         return
     from huggingface_hub import snapshot_download
@@ -111,3 +112,35 @@ def bar(fraction: float, width: int = 10) -> str:
 
 def human_mb(num_bytes: int) -> str:
     return f"{num_bytes / 1_048_576:.0f} MB"
+
+
+def local_first(load):
+    """Run a model load against the files on disk only (Hugging Face offline
+    mode); only if something is missing go online. Each load otherwise asks
+    the Hub first — slow on a bad network, and pointless once downloaded.
+    (From LocalCompanion: Parakeet load 0.36 s → 0.04 s.)"""
+    from huggingface_hub import constants
+
+    was = constants.HF_HUB_OFFLINE
+    constants.HF_HUB_OFFLINE = True
+    try:
+        return load()
+    except Exception:  # noqa: BLE001 — not (fully) on disk: go online
+        constants.HF_HUB_OFFLINE = was
+        return load()
+    finally:
+        constants.HF_HUB_OFFLINE = was
+
+
+def _ensure_gguf(path: str, on_progress: Optional[ProgressCB]) -> None:
+    """A GGUF summary model + llama-server, downloading what's missing (a
+    catalog file by name; any other file must already be there)."""
+    from . import gguf
+
+    gguf.ensure_server(on_progress)
+    if Path(path).is_file():
+        return
+    alias = next((a for a, spec in gguf.CATALOG.items() if spec.file == Path(path).name), None)
+    if alias is None:
+        raise RuntimeError(f"GGUF model not found: {path}")
+    gguf.ensure(alias, on_progress)

@@ -115,10 +115,33 @@ def parse_sections(summary_md: str) -> Dict[str, Any]:
     return out
 
 
-def parse_turns(body: str) -> List[Dict[str, Any]]:
-    """Transcript body → [{speaker, start, text}], consecutive lines of the
-    same speaker merged. Without speaker headers each line is its own turn."""
-    turns: List[Dict[str, Any]] = []
+def _line_words(text: str, start: Optional[float], end: Optional[float],
+                timed: Optional[list]) -> Optional[list]:
+    """``[{w, s, e}]`` for one transcript line: the recorded word timings when
+    they spell the same words, else the line's span shared out by word length
+    (older transcripts have no word timings)."""
+    words = text.split()
+    if timed and len(timed) == len(words):  # spelling may differ slightly
+        return [{"w": w, "s": t[1], "e": t[2]} for w, t in zip(words, timed)]
+    if start is None or not words:
+        return None
+    if end is None or end <= start:
+        end = start + 0.35 * len(words)
+    weights = [len(w) + 2 for w in words]
+    total, t, out = sum(weights), start, []
+    for w, k in zip(words, weights):
+        d = (end - start) * k / total
+        out.append({"w": w, "s": round(t, 2), "e": round(t + d, 2)})
+        t += d
+    return out
+
+
+def parse_turns(body: str, timing: Optional[list] = None) -> List[Dict[str, Any]]:
+    """Transcript body → [{speaker, start, text, words}], consecutive lines of
+    the same speaker merged. Without speaker headers each line is its own
+    turn. ``timing`` = the words sidecar (one entry per line, see
+    :func:`transcript.write_words`); ``words`` is None without line times."""
+    lines: List[tuple] = []
     speaker: Optional[str] = None
     for raw in body.splitlines():
         line = raw.strip()
@@ -130,11 +153,34 @@ def parse_turns(body: str) -> List[Dict[str, Any]]:
             continue
         m = _STAMP.match(line)
         start, text = (_seconds(m.group(1)), m.group(2)) if m else (None, line)
+        lines.append((speaker, start, text))
+    if timing is not None and len(timing) != len(lines):
+        timing = None  # edited by hand: the order no longer lines up
+    turns: List[Dict[str, Any]] = []
+    for i, (speaker, start, text) in enumerate(lines):
+        t = timing[i] if timing else {}
+        nxt = next((l[1] for l in lines[i + 1:] if l[1] is not None), None)
+        end = t.get("e") or (min(nxt, start + 0.5 * len(text.split()) + 1)
+                              if nxt is not None and start is not None else None)
+        words = _line_words(text, t.get("s", start), end, t.get("w"))
         if speaker is not None and turns and turns[-1]["speaker"] == speaker:
             turns[-1]["text"] += " " + text
+            if turns[-1]["words"] is not None and words is not None:
+                turns[-1]["words"] += words
+            else:
+                turns[-1]["words"] = None
         else:
-            turns.append({"speaker": speaker, "start": start, "text": text})
+            turns.append({"speaker": speaker, "start": start, "text": text, "words": words})
     return turns
+
+
+def meeting_audio(path: Path, audio_dir: Optional[Path]) -> Optional[str]:
+    """The MP3 backup of a transcript (same recording-start stamp), or None."""
+    stamp = re.match(r"^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})", path.stem)
+    if not stamp or audio_dir is None:
+        return None
+    mp3 = next(iter(sorted(audio_dir.glob(f"{stamp.group(1)}_*.mp3"))), None)
+    return str(mp3) if mp3 else None
 
 
 def _meta(md: str) -> Dict[str, Any]:
@@ -174,15 +220,21 @@ def meeting_summary(path: Path, md: Optional[str] = None) -> Dict[str, Any]:
             "path": str(path)}
 
 
-def meeting_full(path: Path) -> Dict[str, Any]:
+def meeting_full(path: Path, audio_dir: Optional[Path] = None) -> Dict[str, Any]:
     from . import summarizer
+    from .transcript import words_path
 
     md = path.read_text()
     meta = _meta(md)
     summary_md = summarizer.extract_summary(md)
+    try:
+        timing = json.loads(words_path(path).read_text())
+    except (OSError, ValueError):
+        timing = None
     return {**meeting_summary(path, md), "summary_md": summary_md,
             "sections": parse_sections(summary_md),
-            "turns": parse_turns(summarizer.transcript_body(md)),
+            "turns": parse_turns(summarizer.transcript_body(md), timing),
+            "audio": meeting_audio(path, audio_dir),
             "model": meta["model"], "backend": meta["backend"]}
 
 
@@ -472,11 +524,21 @@ class Engine:
                      else "Whisper " + m.replace("-", " "))
             asr.append({"id": m, "label": label,
                         "installed": downloads.is_cached(transcriber.mlx_repo(m))})
+        from . import gguf
+
         default = summarizer.default_model()
+        catalog_files = {str(gguf.path_for(a)) for a in summarizer.SUMMARY_MODELS}
         summ = [{"id": a, "label": a, "note": spec.note, "size_gb": spec.size_gb,
                  "fits": fits, "installed": summarizer.is_installed(a),
                  "recommended": a == default}
                 for a, spec, fits in summarizer.model_catalog()]
+        budget = summarizer.model_budget_gb()
+        summ += [{"id": g["id"], "label": g["label"],
+                  "note": f"GGUF · {g['folder']}", "size_gb": g["size_gb"],
+                  "fits": budget <= 0 or g["size_gb"] <= budget, "installed": True,
+                  "recommended": False, "local": True}
+                 for g in gguf.scan(self.cfg.gguf_folder)
+                 if str(g["path"]) not in catalog_files]  # catalog files show by name
         return {"asr_models": asr, "summary_models": summ, "languages": LANGUAGES,
                 "default_summary_model": default,
                 "default_prompt": summarizer.default_prompt(self.cfg.language),
@@ -573,6 +635,18 @@ class Engine:
             _mark_busy(False)
             self._set(state="idle", stage=None, progress=None, progress_label=None,
                       title=None)
+            self._release_models()
+
+    def _release_models(self) -> None:
+        """Free the transcription models after a pass, unless a new recording
+        (whose live captions use them) has started meanwhile."""
+        from . import transcriber
+
+        if self.state != "recording":
+            try:
+                transcriber.release_models()
+            except Exception:  # noqa: BLE001
+                print(traceback.format_exc(), file=sys.stderr)
 
     def m_record_cancel(self) -> dict:
         with self._slock:
@@ -621,7 +695,7 @@ class Engine:
         return out
 
     def m_meetings_get(self, id: str) -> dict:
-        return meeting_full(self._path(id))
+        return meeting_full(self._path(id), self.cfg.audio_backup_path)
 
     def m_meetings_summarize(self, id: str) -> dict:
         from .pipeline import Pipeline, summary_error_hint
@@ -646,6 +720,7 @@ class Engine:
             finally:
                 self._set(state="idle", stage=None, progress=None, progress_label=None,
                           title=None)
+                self._release_models()
 
         threading.Thread(target=work, daemon=True, name="meetre-summarize").start()
         return {}
@@ -674,6 +749,7 @@ class Engine:
             finally:
                 self._set(state="idle", stage=None, progress=None, progress_label=None,
                           title=None)
+                self._release_models()
 
         threading.Thread(target=work, daemon=True, name="meetre-retranscribe").start()
         return {}
@@ -707,12 +783,13 @@ class Engine:
             finally:
                 self._set(state="idle", stage=None, progress=None, progress_label=None,
                           title=None)
+                self._release_models()
 
         threading.Thread(target=work, daemon=True, name="meetre-import").start()
         return {}
 
     def m_meetings_rename(self, id: str, title: str) -> dict:
-        from .transcript import _slugify
+        from .transcript import _slugify, move_words
 
         path = self._path(id)
         title = (title or "").strip()
@@ -735,6 +812,7 @@ class Engine:
         tmp.replace(path)
         if new != path:
             path.rename(new)
+            move_words(path, new)
         return meeting_summary(new)
 
     def m_meetings_delete(self, id: str) -> dict:
@@ -748,6 +826,8 @@ class Engine:
                 raise RPCError(f"Could not move to Trash: {err}")
         except ImportError:
             raise RPCError("Moving to Trash needs pyobjc (Foundation).")
+        from .transcript import move_words
+        move_words(path, None)
         return {}
 
     def m_meetings_reveal(self, id: str) -> dict:
@@ -853,6 +933,28 @@ class Engine:
         finally:
             self._set(progress=None, progress_label=None)
         return {}
+
+    def m_models_downloaded(self) -> list:
+        """Models meetre downloaded, with sizes, for Settings → delete: GGUF
+        files it fetched, MLX summary models left from before the switch, and
+        the speech models. Other apps' models in the shared HF cache and the
+        user's own GGUF files are never listed."""
+        from . import config, summarizer, transcriber
+
+        resolved = summarizer.resolve_model(self.cfg.summary_model)
+        out = [{"id": m["id"], "label": m["alias"] or Path(m["id"]).name,
+                "size_bytes": m["size"],
+                "kind": "legacy" if m["kind"] == "legacy" else "summary",
+                "in_use": m["kind"] == "gguf" and resolved.endswith(m["id"])}
+               for m in summarizer.installed_models()]
+        cache = summarizer.hf_cache_dir()
+        for m in config.MODELS:
+            repo = transcriber.mlx_repo(m)
+            d = cache / summarizer._repo_to_dirname(repo)
+            if d.is_dir():
+                out.append({"id": repo, "label": m, "size_bytes": summarizer._dir_size(d),
+                            "kind": "asr", "in_use": m == self.cfg.model})
+        return out
 
     def m_models_uninstall(self, id: str) -> dict:
         from . import config, summarizer, transcriber

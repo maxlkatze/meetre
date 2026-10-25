@@ -487,8 +487,26 @@ final class AppModel {
         Task {
             do {
                 config = try await engine.call("config.set", [key: value]).object ?? config
+                if key == "gguf_folder" { await reloadCatalog() }
             } catch { banner = error.localizedDescription }
         }
+    }
+
+    func reloadCatalog() async {
+        if let k = try? await engine.call("catalog.get", as: Catalog.self) { catalog = k }
+    }
+
+    /// Models meetre downloaded (summary + transcription), for Settings → delete.
+    func downloadedModels() async -> [DownloadedModel] {
+        guard !fixtures else { return [] }
+        return (try? await engine.call("models.downloaded", as: [DownloadedModel].self)) ?? []
+    }
+
+    func deleteModel(_ id: String) async {
+        do {
+            _ = try await engine.call("models.uninstall", ["id": .string(id)])
+            await reloadCatalog()
+        } catch { banner = error.localizedDescription }
     }
 
     func setStartAtLogin(_ on: Bool) {

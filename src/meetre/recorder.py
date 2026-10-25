@@ -53,6 +53,22 @@ def list_devices() -> List[dict]:
     return devices
 
 
+def _to_16k(data: np.ndarray, sr: int) -> np.ndarray:
+    """Resample to 16 kHz with an anti-alias filter (the mic now records at
+    the device's own rate, usually 48 kHz); linear as a fallback."""
+    from math import gcd
+
+    try:
+        from scipy.signal import resample_poly
+
+        g = gcd(SAMPLE_RATE, int(sr))
+        return resample_poly(data, SAMPLE_RATE // g, int(sr) // g).astype("float32")
+    except ImportError:
+        n = int(round(len(data) * SAMPLE_RATE / sr))
+        return np.interp(np.linspace(0, len(data), n, endpoint=False),
+                         np.arange(len(data)), data).astype("float32")
+
+
 def save_mp3(wav_path: Path, mp3_path: Path) -> Path:
     """Encode a WAV file to MP3 (libsndfile-native, no ffmpeg needed)."""
     import soundfile as sf
@@ -181,14 +197,29 @@ class _Source:
         self._last_cb = 0.0
         self.frames = 0
         self.reopened = 0
+        self.overflows = 0     # PortAudio input overflows (dropped buffers)
+        self.padded = 0.0      # s of silence inserted to stay on the clock
+        self._t0: Optional[float] = None
 
     @property
     def seconds(self) -> float:
         return self.frames / self.samplerate if self.samplerate else 0.0
 
+    # The stem must stay on the wall clock: the call stem (ScreenCaptureKit)
+    # does, and the echo removal and the you/call matching line the two up
+    # by time. Opened at 16 kHz, PortAudio's rate conversion delivered ~1 %
+    # too few samples (25 min of mic came out 16 s short) and overflows were
+    # never noticed. Now the device runs at its own rate (converted at stop)
+    # and any shortfall against the clock beyond SYNC_SLACK is filled with
+    # silence, so a drop or stall doesn't shift everything after it.
+    SYNC_SLACK = 0.08     # s of callback jitter tolerated before padding
+
     def _callback(self, indata, frames, time_info, status):  # noqa: ARG002
-        self._last_cb = time.monotonic()
-        self._queue.put((self._stream_rate, indata.copy()))
+        now = time.monotonic()
+        self._last_cb = now
+        if status and status.input_overflow:
+            self.overflows += 1
+        self._queue.put((self._stream_rate, now, indata.copy()))
 
     def _writer(self):
         import soundfile as sf
@@ -199,9 +230,17 @@ class _Source:
         ) as f:
             while not self._stop.is_set() or not self._queue.empty():
                 try:
-                    rate, block = self._queue.get(timeout=0.1)
+                    rate, at, block = self._queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
+                if self._t0 is None:  # the clock starts with the first audio
+                    self._t0 = at - len(block) / rate
+                behind = (at - self._t0) * self.samplerate - (self.frames + len(block) * self.samplerate / rate)
+                if behind > self.SYNC_SLACK * self.samplerate:
+                    gap = int(behind)
+                    f.write(np.zeros((gap, CHANNELS), dtype="float32"))
+                    self.frames += gap
+                    self.padded += gap / self.samplerate
                 # Downmix any multi-channel input to mono.
                 if block.ndim > 1 and block.shape[1] > 1:
                     block = block.mean(axis=1, keepdims=True)
@@ -218,8 +257,9 @@ class _Source:
         """Open (not start) an input stream on ``device``; returns (stream, rate)."""
         import sounddevice as sd
 
-        # Prefer 16 kHz; fall back to the device default rate if rejected.
-        for rate in (SAMPLE_RATE, None):
+        # The device's own rate: asking PortAudio for 16 kHz made it convert
+        # and lose ~1 % of the samples. _mix resamples to 16 kHz at the end.
+        for rate in (None, SAMPLE_RATE):
             try:
                 sr = rate or int(sd.query_devices(device)["default_samplerate"])
                 stream = sd.InputStream(samplerate=sr, channels=CHANNELS,
@@ -500,7 +540,10 @@ class Recorder:
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{role}: {e}")
             print(f"meetre: stopped {role} in {time.monotonic() - t0:.1f}s"
-                  + (f" (mic reopened {src.reopened}×)" if getattr(src, "reopened", 0) else ""),
+                  + (f" (mic reopened {src.reopened}×)" if getattr(src, "reopened", 0) else "")
+                  + (f", {src.overflows} overflows" if getattr(src, "overflows", 0) else "")
+                  + (f", {src.padded:.2f}s padded to stay in sync"
+                     if getattr(src, "padded", 0) else ""),
                   file=sys.stderr, flush=True)
         if errors:
             print("meetre: error stopping audio source(s): " + "; ".join(errors), file=sys.stderr)
@@ -519,12 +562,7 @@ class Recorder:
             if data.ndim > 1:
                 data = data.mean(axis=1)
             if sr != SAMPLE_RATE and len(data):
-                # Linear resample to 16 kHz.
-                n = int(round(len(data) * SAMPLE_RATE / sr))
-                data = np.interp(
-                    np.linspace(0, len(data), n, endpoint=False),
-                    np.arange(len(data)), data,
-                ).astype("float32")
+                data = _to_16k(data, sr)
             # Save a per-source stem for source-aware diarization.
             role = getattr(src, "role", "source")
             stem = Path(tempfile.mktemp(suffix=f"_meetre_stem_{role}.wav"))

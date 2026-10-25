@@ -17,72 +17,58 @@ from collections import namedtuple
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .mlxthread import on_mlx_thread
 
-# A summary model: HF repo, approximate 4-bit weight size in GB (measured from
-# the mlx-community repos), a one-line note, and whether it is a reasoning
-# ("thinking") model. The size drives the per-machine "does this fit?" check
-# below — bigger models give better German summaries but need proportionally
-# more unified memory. ``thinks`` makes summarize() turn on the model's internal
-# reasoning pass (the <think> block is generated, then stripped from the output).
-# ``revision`` pins a repo to a reviewed commit — required for repos that ship
-# their own model code (mlx-lm executes it on load), so a later upload can't
-# swap in different code. ``template_kwargs`` are extra chat-template options.
-ModelSpec = namedtuple("ModelSpec", "repo size_gb note thinks revision template_kwargs")
-ModelSpec.__new__.__defaults__ = (False, None, None)
+# A summary model (all GGUF, run by llama-server — see gguf.py): the
+# downloadable file in gguf.CATALOG under the same alias, its size in GB (for
+# the per-machine "does this fit?" check), a one-line note, and whether it
+# reasons before answering. ``template_kwargs`` are chat-template options.
+ModelSpec = namedtuple("ModelSpec", "size_gb note thinks template_kwargs")
+ModelSpec.__new__.__defaults__ = (False, None)
 
-# Current generation (June 2026): Qwen3.5 + Gemma 4. Qwen3.5 are hybrid models
-# but we run them in direct (non-reasoning) mode — for summarization the hidden
-# reasoning pass adds latency and can truncate/leak with no quality win, so all
-# models below answer directly. Gemma 4 has the strongest multilingual coverage.
 SUMMARY_MODELS = {
-    # --- Qwen3.5 (run in direct mode) ----------------------------------
-    "qwen3.5-397b":  ModelSpec("mlx-community/Qwen3.5-397B-A17B-4bit", 210.0, "flagship MoE — Mac Studio Ultra only"),
-    "qwen3.5-122b":  ModelSpec("mlx-community/Qwen3.5-122B-A10B-MLX-4bit", 66.0, "large MoE — high-RAM Studio"),
-    "qwen3.5-35b":   ModelSpec("mlx-community/Qwen3.5-35B-A3B-4bit", 19.6, "MoE, ~3B active — fast, best all-round"),
-    "qwen3.5-27b":   ModelSpec("mlx-community/Qwen3.5-27B-4bit", 15.0, "dense — top quality"),
-    "qwen3.5-9b":    ModelSpec("mlx-community/Qwen3.5-9B-4bit", 5.0, "balanced — fits 16 GB"),
-    "qwen3.5-4b":    ModelSpec("mlx-community/Qwen3.5-4B-MLX-4bit", 2.4, "small — fast"),
-    "qwen3.5-2b":    ModelSpec("mlx-community/Qwen3.5-2B-MLX-4bit", 1.3, "minimal — fastest"),
-    # --- Gemma 4 (instruction, strongest multilingual) -----------------
-    "gemma4-26b":    ModelSpec("mlx-community/gemma-4-26b-a4b-it-4bit", 14.5, "MoE — excellent German / 140+ languages"),
-    "gemma4-12b":    ModelSpec("mlx-community/gemma-4-12B-4bit", 6.8, "dense — strong multilingual, lighter"),
-    "gemma4-e4b":    ModelSpec("mlx-community/gemma-4-e4b-it-4bit", 3.4, "minimal, 140+ languages"),
-    # --- K2 Horizon (IFM, Sept 2026; always reasons before answering) ---
-    # Not yet a native mlx-lm architecture: the repo ships k2_horizon.py, which
-    # mlx-lm runs on load. Pinned to the commit whose code was reviewed.
-    "k2-horizon-7b": ModelSpec("mlx-community/K2-Horizon-7B-4bit", 7.2,
-                               "reasoning — excellent summary writing", True,
-                               "c8698376a102bc5e7ad49089b21b62c096a2506c",
-                               # "low": ~8 s for a 3-min meeting; "medium"
-                               # overran the think budget (~160 s) for the
-                               # same text, so it's not worth it here.
+    # K2 Horizon (IFM, Sept 2026; always reasons). "low" = no reasoning: K2
+    # closes the think block at once (see CLAUDE.md for the measurements).
+    "k2-horizon-7b": ModelSpec(9.6, "excellent summary writing", True,
                                {"reasoning_effort": "low"}),
-    # --- Mistral (no newer 2026 release; solid all-rounder) ------------
-    "mistral-24b":   ModelSpec("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", 13.3, "solid all-rounder, no reasoning"),
-    # --- Legacy aliases: not shown in the menu, kept so an existing
-    #     config.summary_model still resolves to a real repo. -----------
-    "qwen3-32b":     ModelSpec("mlx-community/Qwen3-32B-4bit", 18.4, "legacy — Qwen3 dense"),
-    "gemma3-27b":    ModelSpec("mlx-community/gemma-3-27b-it-4bit", 16.9, "legacy — Gemma 3"),
-    "qwen3-30b-a3b": ModelSpec("mlx-community/Qwen3-30B-A3B-4bit", 17.2, "legacy — Qwen3 MoE"),
-    "qwen3-14b":     ModelSpec("mlx-community/Qwen3-14B-4bit", 8.3, "legacy — Qwen3"),
-    "qwen3-8b":      ModelSpec("mlx-community/Qwen3-8B-4bit", 4.6, "legacy — Qwen3"),
-    "gemma3-4b":     ModelSpec("mlx-community/gemma-3-4b-it-4bit", 3.4, "legacy — Gemma 3"),
-    "qwen3-4b":      ModelSpec("mlx-community/Qwen3-4B-4bit", 2.3, "legacy — Qwen3"),
-    "qwen3-235b":    ModelSpec("mlx-community/Qwen3-235B-A22B-4bit", 132.3, "legacy — Qwen3 flagship MoE"),
+    # Gemma 4 QAT: best German in LocalCompanion's tests (36/38).
+    "gemma4-12b":    ModelSpec(6.7, "strong German, 140+ languages"),
+    "qwen3.5-9b":    ModelSpec(6.7, "balanced", False, {"enable_thinking": False}),
+    "gemma4-e4b":    ModelSpec(4.2, "small, multilingual"),
+    "qwen3.5-4b":    ModelSpec(2.9, "smallest, fastest", False, {"enable_thinking": False}),
 }
 
-# Preferred → fallback. Used both for menu order and for picking the model that
-# "auto" runs on a given machine. K2 Horizon 7B leads: it writes the best
-# summaries we've seen and, at ~7 GB, fits almost every Mac; the rest are ranked
-# best → smallest for machines where it doesn't. Only current-generation models
-# appear here; legacy aliases above stay resolvable but off the menu.
-_BEST_FIRST = [
-    "k2-horizon-7b",
-    "qwen3.5-397b", "qwen3.5-122b", "qwen3.5-35b", "qwen3.5-27b",
-    "gemma4-26b", "mistral-24b", "gemma4-12b", "qwen3.5-9b",
-    "gemma4-e4b", "qwen3.5-4b", "qwen3.5-2b",
-]
+# Retired aliases (the MLX lineup) → the closest model now, so an existing
+# config.summary_model keeps working.
+_RETIRED = {
+    "qwen3.5-397b": "k2-horizon-7b", "qwen3.5-122b": "k2-horizon-7b",
+    "qwen3.5-35b": "gemma4-12b", "qwen3.5-27b": "gemma4-12b", "gemma4-26b": "gemma4-12b",
+    "mistral-24b": "gemma4-12b", "qwen3.5-2b": "qwen3.5-4b", "qwen3-32b": "gemma4-12b",
+    "gemma3-27b": "gemma4-12b", "qwen3-30b-a3b": "gemma4-12b", "qwen3-14b": "qwen3.5-9b",
+    "qwen3-8b": "qwen3.5-9b", "gemma3-4b": "gemma4-e4b", "qwen3-4b": "qwen3.5-4b",
+    "qwen3-235b": "k2-horizon-7b",
+}
+
+# Preferred → fallback: menu order and what "auto" picks on a given machine.
+# Gemma 4 12B QAT leads (measured 2026-10-25 on 4 real German meetings): as
+# fast as K2 Q8 (37 tok/s), 8.9 GB instead of 11.4 GB, the only model that
+# kept unsettled points out of "Entscheidungen", and the best name reader.
+_BEST_FIRST = ["gemma4-12b", "k2-horizon-7b", "qwen3.5-9b", "gemma4-e4b", "qwen3.5-4b"]
+
+# The MLX repos meetre downloaded before the switch to GGUF: offered for
+# deletion in Settings (other apps' models share the HF cache — never touched).
+LEGACY_MLX_REPOS = {
+    "mlx-community/K2-Horizon-7B-4bit", "mlx-community/Qwen3.5-397B-A17B-4bit",
+    "mlx-community/Qwen3.5-122B-A10B-MLX-4bit", "mlx-community/Qwen3.5-35B-A3B-4bit",
+    "mlx-community/Qwen3.5-27B-4bit", "mlx-community/Qwen3.5-9B-4bit",
+    "mlx-community/Qwen3.5-4B-MLX-4bit", "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "mlx-community/gemma-4-26b-a4b-it-4bit", "mlx-community/gemma-4-12B-4bit",
+    "mlx-community/gemma-4-e4b-it-4bit",
+    "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", "mlx-community/Qwen3-32B-4bit",
+    "mlx-community/gemma-3-27b-it-4bit", "mlx-community/Qwen3-30B-A3B-4bit",
+    "mlx-community/Qwen3-14B-4bit", "mlx-community/Qwen3-8B-4bit",
+    "mlx-community/gemma-3-4b-it-4bit", "mlx-community/Qwen3-4B-4bit",
+    "mlx-community/Qwen3-235B-A22B-4bit",
+}
 
 # Fraction of total unified memory we treat as usable for model weights + the
 # KV cache, leaving the rest for the OS and other apps. Apple's GPU can wire
@@ -148,7 +134,7 @@ def default_model(total_gb: Optional[float] = None) -> str:
     for alias in _BEST_FIRST:
         if model_fits(alias, total_gb):
             return alias
-    return "qwen3-4b"
+    return "qwen3.5-4b"
 
 
 def model_catalog(total_gb: Optional[float] = None) -> List[Tuple[str, ModelSpec, bool]]:
@@ -181,73 +167,97 @@ def _dirname_to_repo(name: str) -> str:
     return name[len("models--"):].replace("--", "/") if name.startswith("models--") else name
 
 
-def _dir_size(path: Path) -> int:
-    """On-disk bytes under ``path``. Counts real files (blobs) once; HF stores
-    snapshots as symlinks into ``blobs/``, so we skip symlinks to avoid double
-    counting."""
-    total = 0
+def _blob_files(path: Path) -> set:
+    """The real files holding a model's data. HF snapshots link into the
+    model's ``blobs/``, and some caches (deduplicated stores) link those on
+    into a shared ``hub/blobs/`` — so links are followed, each file once."""
+    files = set()
     for p in path.rglob("*"):
         try:
-            st = p.lstat()
-            if _stat.S_ISREG(st.st_mode):
-                total += st.st_size
+            real = p.resolve()
+            if _stat.S_ISREG(real.stat().st_mode):
+                files.add(real)
+        except OSError:
+            pass
+    return files
+
+
+def _dir_size(path: Path) -> int:
+    """On-disk bytes of a model, following links, each real file once."""
+    total = 0
+    for f in _blob_files(path):
+        try:
+            total += f.stat().st_size
         except OSError:
             pass
     return total
 
 
-def _repo_for(name_or_repo: str) -> str:
-    """Resolve an alias/auto to its HF repo id; pass repo ids through."""
-    spec = SUMMARY_MODELS.get(name_or_repo)
-    if spec is not None:
-        return spec.repo
-    if not name_or_repo or name_or_repo == "auto":
-        return resolve_model("auto")
-    return name_or_repo
+def _alias(name: Optional[str]) -> Optional[str]:
+    """Catalog alias for an alias / ``"auto"`` / retired alias (None for a
+    ``gguf:`` path or anything unknown)."""
+    if not name or name == "auto":
+        return default_model()
+    name = _RETIRED.get(name, name)
+    return name if name in SUMMARY_MODELS else None
 
 
-def installed_size(name_or_repo: str) -> int:
-    """Bytes a model occupies in the cache, or 0 if not downloaded."""
-    p = hf_cache_dir() / _repo_to_dirname(_repo_for(name_or_repo))
-    return _dir_size(p) if p.is_dir() else 0
+def installed_size(name: str) -> int:
+    """Bytes a catalog model occupies on disk, or 0 if not there."""
+    from . import gguf
+
+    a = _alias(name)
+    p = gguf.path_for(a) if a else (Path(name[len(gguf.PREFIX):]) if gguf.is_gguf(name) else None)
+    return p.stat().st_size if p is not None and p.is_file() else 0
 
 
-def is_installed(name_or_repo: str) -> bool:
-    return (hf_cache_dir() / _repo_to_dirname(_repo_for(name_or_repo))).is_dir()
+def is_installed(name: str) -> bool:
+    return installed_size(name) > 0
 
 
 def installed_models() -> List[Dict[str, object]]:
-    """Every model in the HF cache: ``{repo, alias, size, path}``, largest first.
+    """Everything meetre downloaded that can be deleted: GGUF files it fetched
+    into the models folder, and MLX models left from before the switch.
+    ``{id, alias, size, kind}``, largest first. The user's own GGUFs and
+    other apps' models in the HF cache are never listed."""
+    from . import gguf
 
-    Includes non-summary models (e.g. Whisper) so the user can reclaim space.
-    """
+    out = [{"id": str(d["path"]), "alias": d["alias"], "size": d["size"], "kind": "gguf"}
+           for d in gguf.downloaded()]
     cache = hf_cache_dir()
-    if not cache.is_dir():
-        return []
-    repo_to_alias = {spec.repo: alias for alias, spec in SUMMARY_MODELS.items()}
-    out = []
-    for d in cache.glob("models--*"):
-        if not d.is_dir():
-            continue
-        repo = _dirname_to_repo(d.name)
-        out.append({
-            "repo": repo,
-            "alias": repo_to_alias.get(repo),
-            "size": _dir_size(d),
-            "path": d,
-        })
+    for repo in sorted(LEGACY_MLX_REPOS):
+        d = cache / _repo_to_dirname(repo)
+        if d.is_dir():
+            out.append({"id": repo, "alias": repo.split("/")[-1], "size": _dir_size(d),
+                        "kind": "legacy"})
     out.sort(key=lambda m: m["size"], reverse=True)
     return out
 
 
-def uninstall_model(name_or_repo: str) -> int:
-    """Delete a model from the HF cache. Returns freed bytes (0 if absent)."""
-    repo = _repo_for(name_or_repo)
-    p = hf_cache_dir() / _repo_to_dirname(repo)
+def uninstall_model(id: str) -> int:
+    """Delete a model meetre downloaded: a GGUF file it fetched, or a legacy
+    MLX repo (or any HF repo id — speech models). Returns freed bytes."""
+    from . import gguf
+
+    if id.startswith("/"):
+        return gguf.delete(id)
+    p = hf_cache_dir() / _repo_to_dirname(id)
     if not p.is_dir():
         return 0
-    freed = _dir_size(p)
+    files = _blob_files(p)
+    outside = {f for f in files if p.resolve() not in f.parents}
+    freed = sum(f.stat().st_size for f in files - outside if f.exists())
     shutil.rmtree(p, ignore_errors=True)
+    if outside:  # shared store: delete only what no other model still links to
+        still = set()
+        for d in hf_cache_dir().glob("models--*"):
+            still |= _blob_files(d) & outside
+        for f in outside - still:
+            try:
+                freed += f.stat().st_size
+                f.unlink()
+            except OSError:
+                pass
     return freed
 
 
@@ -296,6 +306,11 @@ _DEFAULT_INSTRUCTION = {
           "oder Offene Fragen steht, steht nicht noch einmal woanders.\n"
           "- Keine Widersprüche: Ein Punkt ist entweder entschieden oder offen, "
           "nie beides.\n"
+          "- Entscheidung heißt: Die Runde hat sich ausdrücklich festgelegt "
+          "(„machen wir so“, „nehmen wir“, „lassen wir“). Nur vorgeschlagen, "
+          "erwogen oder bevorzugt → Offene Frage. Fakten, Preise und Zahlen "
+          "sind keine Entscheidungen — sie gehören als Begründung zur "
+          "Entscheidung oder in die Zusammenfassung.\n"
           "- Das Transkript stammt aus Spracherkennung und enthält Hörfehler. "
           "Korrigiere offensichtliche Fehler still aus dem Kontext (z. B. "
           "„Jason“ → „JSON“). Ergibt ein Wort oder Satz auch so keinen Sinn, lass "
@@ -337,6 +352,11 @@ _DEFAULT_INSTRUCTION = {
           "- Every piece of information exactly once: what is under Decisions, "
           "Action items or Open questions does not appear anywhere else.\n"
           "- No contradictions: a point is either decided or open, never both.\n"
+          "- A decision means the group explicitly settled it (\"let's do that\", "
+          "\"we'll take …\", \"we drop …\"). Only proposed, considered or "
+          "preferred → Open question. Facts, prices and numbers are not "
+          "decisions — they go with a decision as its reason, or into the "
+          "summary.\n"
           "- The transcript comes from speech recognition and contains "
           "mishearings. Silently fix obvious errors from context (e.g. "
           "\"Jason\" → \"JSON\"). If a word or sentence still makes no sense, "
@@ -447,74 +467,76 @@ def default_prompt(language: Optional[str] = None) -> str:
 
 
 def available() -> bool:
-    try:
-        import mlx_lm  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+    """Summaries run on llama.cpp, which meetre fetches itself when missing."""
+    return True
 
 
 def model_thinks(name: Optional[str]) -> bool:
-    """Whether a model (alias or 'auto') reasons before answering.
-
-    Unknown/custom repos are detected heuristically from the repo name so a
-    pasted "…-Thinking…" repo still gets a reasoning pass and token headroom.
-    """
-    alias = default_model() if (not name or name == "auto") else name
-    spec = SUMMARY_MODELS.get(alias)
+    """Whether a model (alias, 'auto' or a GGUF file) reasons before answering."""
+    spec = _spec(name)
     if spec is not None:
         return bool(spec.thinks)
-    return "think" in alias.lower()
+    return "think" in (name or "").lower()
 
 
-def _spec(name_or_repo: Optional[str]) -> Optional[ModelSpec]:
-    """The catalog entry for an alias, ``"auto"``, or a repo id (None if unknown)."""
-    if not name_or_repo or name_or_repo == "auto":
-        name_or_repo = default_model()
-    spec = SUMMARY_MODELS.get(name_or_repo)
-    if spec is not None:
-        return spec
-    return next((s for s in SUMMARY_MODELS.values() if s.repo == name_or_repo), None)
+def _spec(name: Optional[str]) -> Optional[ModelSpec]:
+    """The catalog entry for an alias / ``"auto"`` / retired alias. A GGUF
+    file of a catalog family (``K2-Horizon-7B-Q6_K.gguf``) gets that family's
+    settings (reasoning, template options); other files None."""
+    a = _alias(name)
+    if a is not None:
+        return SUMMARY_MODELS[a]
+    from . import gguf
 
-
-def model_revision(name_or_repo: Optional[str]) -> Optional[str]:
-    """Pinned commit for a model (None = latest)."""
-    spec = _spec(name_or_repo)
-    return spec.revision if spec is not None else None
+    if gguf.is_gguf(name):
+        file = Path(name).name.lower().replace("_", "-")
+        for alias, pattern in (("k2-horizon-7b", "k2-horizon"), ("gemma4-12b", "gemma-4"),
+                               ("qwen3.5-9b", "qwen3.5")):
+            if pattern in file:
+                return SUMMARY_MODELS[alias]._replace(size_gb=0.0)
+    return None
 
 
 def _load_model(model: Optional[str]):
-    """mlx_lm.load with the model's pinned revision.
+    """``(server, tokenizer)``: the llama-server running this model."""
+    from . import gguf
 
-    Repos that ship their own architecture code (K2 Horizon's k2_horizon.py)
-    need ``trust_remote_code``; it is granted ONLY to specs pinned to a
-    reviewed commit, so unreviewed code can never run. Older mlx-lm releases
-    have no such flag (and executed the code unconditionally) — fall back.
-    """
-    from mlx_lm import load
+    srv = gguf.load(resolve_model(model))
+    return srv, gguf.Tokenizer(srv)
 
-    repo = resolve_model(model)
-    rev = model_revision(model)
-    if rev:
-        try:
-            return load(repo, revision=rev, trust_remote_code=True)
-        except TypeError:
-            pass
-    return load(repo, revision=rev)
+
+def _chat(lm, messages: List[dict], max_tokens: int, tmpl: Optional[dict] = None,
+          penalty: bool = False, json_schema: Optional[dict] = None):
+    """Text pieces of a reply, reasoning wrapped in ``<think>…</think>`` so
+    the callers' think handling (_THINK_CLOSE, _strip_thinking) is unchanged.
+
+    ``penalty``: mild repetition penalty over the recent output (see
+    :func:`summarize`)."""
+    from . import gguf
+
+    state = "start"  # → "think" → "text"
+    for kind, piece in gguf.chat(lm, messages, max_tokens, template_kwargs=tmpl,
+                                 json_schema=json_schema,
+                                 repetition_penalty=1.05 if penalty else None):
+        if kind == "think" and state == "start":
+            state, piece = "think", "<think>" + piece
+        elif kind == "text" and state != "text":
+            # The answer has begun: always close the (maybe empty) reasoning
+            # block, or callers take a direct answer for a cut-off thought
+            # (K2 on "low" reasons not at all — every summary came back empty).
+            piece = ("</think>" if state == "think" else "<think></think>") + piece
+            state = "text"
+        yield piece
 
 
 def resolve_model(name: Optional[str]) -> str:
-    """Accept a friendly alias, ``"auto"``, or a full HF repo id.
+    """``gguf:<path>`` for an alias, ``"auto"`` (the best model that fits this
+    machine), a retired alias, or a ``gguf:`` path (passed through)."""
+    from . import gguf
 
-    ``"auto"`` (or an empty value) resolves to the best model that fits this
-    machine, so the same config behaves sensibly on a 16 GB laptop and a 64 GB
-    Studio alike.
-    """
-    if not name or name == "auto":
-        name = default_model()
-    spec = SUMMARY_MODELS.get(name)
-    return spec.repo if spec is not None else name
+    if gguf.is_gguf(name):
+        return name
+    return gguf.PREFIX + str(gguf.path_for(_alias(name) or default_model()))
 
 
 def _strip_thinking(text: str) -> str:
@@ -611,7 +633,6 @@ def summarize_markdown(md: str, model: Optional[str] = None, language: Optional[
     return summarize(transcript_body(md), model=model, language=language)
 
 
-@on_mlx_thread
 def summarize(
     text: str,
     model: Optional[str] = None,
@@ -630,12 +651,8 @@ def summarize(
     "part 2/5" / "merge" while long meetings are summarized in chunks.
     Called from the generating thread.
     """
-    if not available():
-        raise RuntimeError("Summarization needs mlx-lm: pip install mlx-lm")
     if not text.strip():
         return ""
-
-    from mlx_lm import stream_generate
 
     repo = resolve_model(model)
     thinks = model_thinks(model)
@@ -671,27 +688,16 @@ def summarize(
     # loops one bullet until the token cap. Measured on K2 Horizon 7B with real
     # 30-min meetings: all four sections every time, ~40% faster; temperature
     # sampling instead dropped whole sections.
-    from mlx_lm.sample_utils import make_logits_processors
-
-    penalty = make_logits_processors(repetition_penalty=1.05, repetition_context_size=256)
-
     def _generate(user: str, max_tokens: int, use_thinking: bool, **extra) -> str:
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": user}]
-        try:
-            chat = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, enable_thinking=use_thinking,
-                **{**tmpl, **extra},
-            )
-        except TypeError:
-            chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
         raw = ""
-        for resp in stream_generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens,
-                                    logits_processors=penalty):
-            raw += resp.text
-            if "\n" in resp.text and _looping(raw):
+        for piece in _chat(lm, messages, max_tokens,
+                           {"enable_thinking": use_thinking, **tmpl, **extra}, penalty=True):
+            raw += piece
+            if "\n" in piece and _looping(raw):
                 break  # stuck repeating one line; the rest is dedupe'd away
-            if on_progress is not None and resp.text:
+            if on_progress is not None and piece:
                 if use_thinking and not _THINK_CLOSE.search(raw):
                     on_progress("thinking", raw, stage["label"])
                 else:
@@ -734,7 +740,6 @@ def summarize(
     return _dedupe_lines(_run(f"{reduce_instr}\n\n{chr(10).join(partials)}", answer_budget))
 
 
-@on_mlx_thread
 def generate_title(
     text: str,
     model: Optional[str] = None,
@@ -745,12 +750,8 @@ def generate_title(
     Uses the same local MLX model as :func:`summarize`. Returns a single
     cleaned-up line; ``""`` if unavailable or the input is empty.
     """
-    if not available():
-        raise RuntimeError("Title generation needs mlx-lm: pip install mlx-lm")
     if not text.strip():
         return ""
-
-    from mlx_lm import generate
 
     repo = resolve_model(model)
     thinks = model_thinks(model)
@@ -769,13 +770,9 @@ def generate_title(
     snippet = text.strip()[:6000]
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": f"{instruction}\n\n{label}:\n{snippet}"}]
-    try:
-        chat = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, enable_thinking=thinks, **tmpl)
-    except TypeError:
-        chat = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-    max_tokens = 40 + (4000 if thinks else 0)
-    raw = generate(lm, tokenizer, prompt=chat, max_tokens=max_tokens, verbose=False)
+    # "low" reasoning closes the think block at once: no reasoning budget.
+    max_tokens = 40 + (4000 if thinks and tmpl.get("reasoning_effort") != "low" else 0)
+    raw = "".join(_chat(lm, messages, max_tokens, {"enable_thinking": thinks, **tmpl}))
     return _clean_title(_strip_thinking(raw))
 
 
@@ -807,27 +804,19 @@ def _load_for_chat(model: Optional[str]):
     resident while it is open and calls :func:`release_chat_model` on close.
     """
     repo = resolve_model(model)
-    rev = model_revision(model)
-    if _chat_model["key"] != (repo, rev):
-        release_chat_model()
+    if _chat_model["key"] != repo:
         lm, tok = _load_model(model)
-        _chat_model.update(key=(repo, rev), lm=lm, tok=tok)
+        _chat_model.update(key=repo, lm=lm, tok=tok)
     return _chat_model["lm"], _chat_model["tok"]
 
 
-@on_mlx_thread
 def release_chat_model() -> None:
-    """Free the resident chat model (and the Metal buffers it holds)."""
+    """Free the chat model: the llama-server stops (it also stops by itself
+    after gguf.IDLE_SECONDS without use)."""
+    from . import gguf
+
     _chat_model.update(key=None, lm=None, tok=None)
-    try:
-        import gc
-
-        import mlx.core as mx
-
-        gc.collect()
-        mx.clear_cache()
-    except Exception:  # noqa: BLE001
-        pass
+    gguf.release()
 
 
 _CHAT_SYSTEM = {
@@ -846,7 +835,7 @@ _CHAT_SYSTEM = {
 
 # Transcript budget for the chat context (~15k tokens): long meetings keep
 # their beginning and end, which is where agendas and wrap-ups live.
-_CHAT_TRANSCRIPT_CHARS = 60_000
+_CHAT_TRANSCRIPT_CHARS = 40_000  # fits gguf.CONTEXT (16k tokens) with the answer
 
 
 def _fit_transcript(text: str, limit: int = _CHAT_TRANSCRIPT_CHARS) -> str:
@@ -856,7 +845,6 @@ def _fit_transcript(text: str, limit: int = _CHAT_TRANSCRIPT_CHARS) -> str:
     return f"{text[:half]}\n\n[… middle of the meeting omitted for length …]\n\n{text[-half:]}"
 
 
-@on_mlx_thread
 def chat(
     history: List[Dict[str, str]],
     model: Optional[str] = None,
@@ -881,10 +869,6 @@ def chat(
     the model may emit tool calls, which are executed (``on_tool(label,
     result_or_None)`` reports start/finish) and fed back, up to ``max_rounds``.
     """
-    if not available():
-        raise RuntimeError("Chat needs mlx-lm: pip install mlx-lm")
-    from mlx_lm import stream_generate
-
     from . import tools as _tools
 
     lm, tokenizer = _load_for_chat(model)
@@ -919,9 +903,11 @@ def chat(
     budget = max_tokens + (4000 if thinks else 0)
     for _round in range(max_rounds + 1):
         raw = ""
-        for resp in stream_generate(lm, tokenizer, prompt=render(), max_tokens=budget):
-            raw += resp.text
-            if on_progress is not None and resp.text:
+        from . import gguf
+
+        for piece in gguf.complete(lm, render(), budget):
+            raw += piece
+            if on_progress is not None and piece:
                 if thinks and not _THINK_CLOSE.search(raw):
                     on_progress("thinking", raw)
                 else:
@@ -960,16 +946,18 @@ def chat(
 # against the transcript so a hallucinated name can never be applied.
 
 _NAME_INSTRUCTION = (
-    "Below is a meeting transcript with anonymous speaker labels. Identify the "
-    "real first name (or full name) of each speaker ONLY where the transcript "
-    "gives explicit evidence: the speaker introduces themselves, is addressed "
-    "by name right before they speak, or is named when handed the floor. "
-    "A name a speaker says to someone else (\"Thanks Ben\", \"Ben, can you …\") "
-    "belongs to a DIFFERENT speaker — usually the one who answers next. "
-    "Do not guess. Leave a speaker out if unsure.\n\n"
-    "Answer with JSON only, e.g. "
-    '{"Speaker 1": {"name": "Anna", "evidence": "Thanks Anna, go ahead."}}\n\n'
-    "Speaker labels: {labels}"
+    "Below is a meeting transcript; each line starts with an anonymous speaker "
+    "label ({labels}). List the places where a person's first name (or full "
+    "name) is SPOKEN in the transcript. For each one give: the exact words "
+    "(quote), the label of the speaker who says it, the name, and how it is "
+    "used:\n"
+    "- \"addresses_listener\": said to the person being spoken to "
+    "(\"Thanks, Anna\", \"Ben, can you …\", \"Hey Lara\")\n"
+    "- \"introduces_self\": the speaker's own name (\"I'm Anna\", \"Ich bin Ben\", "
+    "\"Anna here\")\n"
+    "- \"talks_about_someone\": anyone else (\"Julia's page\", a story, a quote)\n"
+    "Only names that are really spoken; at most 12, the clearest first. "
+    "Answer with JSON only."
 )
 
 
@@ -986,7 +974,6 @@ def _parse_json_object(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-@on_mlx_thread
 def infer_speaker_names(
     text: str,
     labels: List[str],
@@ -1001,8 +988,6 @@ def infer_speaker_names(
     """
     if not available() or not labels or not text.strip():
         return {}
-    from mlx_lm import generate
-
     repo = resolve_model(model)
     spec = _spec(model)
     tmpl = dict((spec.template_kwargs if spec else None) or {})
@@ -1011,16 +996,106 @@ def infer_speaker_names(
     thinks = model_thinks(model)
     lm, tokenizer = _load_model(model)
     snippet = _fit_transcript(text.strip(), 40_000)
-    instruction = _NAME_INSTRUCTION.replace("{labels}", ", ".join(labels))
+    # The example uses the real labels: with "Speaker 1" in it, K2 answered
+    # for "Speaker 1 … 134" (labels here are "Ich", "Sprecher") — all dropped.
+    instruction = (_NAME_INSTRUCTION.replace("{labels}", ", ".join(labels))
+                   .replace("{first}", labels[-1]))
     messages = [{"role": "user", "content": f"{instruction}\n\nTranscript:\n{snippet}"}]
-    try:
-        chat_prompt = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, enable_thinking=thinks, **tmpl)
-    except TypeError:
-        chat_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-    raw = generate(lm, tokenizer, prompt=chat_prompt,
-                   max_tokens=400 + (4000 if thinks else 0), verbose=False)
-    return _verified_names(_parse_json_object(_strip_thinking(raw)), labels, text)
+    # The model only reads lines (who says which name, how); the rules of who
+    # that makes whom are applied in code (_names_from_mentions). Asked to
+    # map labels to names itself, every model gave the name to the speaker
+    # who SAYS it ("…, Jenny" → "Ich = Jenny"); free-form JSON also came in
+    # the wrong shape or looped to the token cap. The schema (llama-server
+    # grammar) fixes the shape; the quote comes first so the rest follows it.
+    schema = {"type": "object", "additionalProperties": False, "required": ["mentions"],
+              "properties": {"mentions": {"type": "array", "maxItems": 12, "items": {
+                  "type": "object", "additionalProperties": False,
+                  "required": ["quote", "said_by", "name", "use"],
+                  "properties": {
+                      "quote": {"type": "string", "maxLength": 160},
+                      "said_by": {"type": "string", "enum": list(labels)},
+                      "name": {"type": "string", "maxLength": 40},
+                      "use": {"type": "string", "enum": ["addresses_listener", "introduces_self",
+                                                         "talks_about_someone"]}}}}}}
+    kw = {"enable_thinking": thinks, **tmpl}
+    budget = 900 + (4000 if thinks and tmpl.get("reasoning_effort") != "low" else 0)
+    raw = "".join(_chat(lm, messages, budget, kw, json_schema=schema))
+    data = _first_json_object(_strip_thinking(raw)) or {}
+    return _names_from_mentions(data.get("mentions") or [], labels, text)
+
+
+def _names_from_mentions(mentions: list, labels: List[str], text: str) -> Dict[str, str]:
+    """Who is called what, from the name mentions the model read off the lines.
+
+    Only mentions whose name really occurs in a line of that speaker count.
+    A name said to the listener belongs to the other speaker (with two
+    labels), else to whoever speaks next after that line; a self-introduction
+    to the speaker; names merely talked about to nobody. Each label takes its
+    most frequent name; a name goes to one label only."""
+    lines = [(l.split(":", 1)[0], l.split(":", 1)[1].lower())
+             for l in text.splitlines() if ":" in l and l.split(":", 1)[0] in labels]
+    votes: Dict[Tuple[str, str], int] = {}
+    for m in mentions:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("name") or "").strip().strip(".,:;\"'")
+        who, use = m.get("said_by"), m.get("use")
+        if (who not in labels or not name or len(name) > 40
+                or not re.match(r"^[^\W\d_][\w .'-]*$", name)
+                or name.lower() in {l.lower() for l in labels}):
+            continue
+        pat = re.compile(rf"\b{re.escape(name.lower())}\b")
+        at = next((i for i, (spk, t) in enumerate(lines) if spk == who and pat.search(t)), None)
+        if at is None:
+            continue  # not actually said by that speaker
+        if use == "introduces_self":
+            target = who
+        elif use == "addresses_listener":
+            others = [l for l in labels if l != who]
+            target = others[0] if len(others) == 1 else next(
+                (spk for spk, _ in lines[at + 1:] if spk != who), None)
+        else:
+            continue
+        if target is not None:
+            votes[(target, name)] = votes.get((target, name), 0) + 1
+    out: Dict[str, str] = {}
+    for (label, name), _n in sorted(votes.items(), key=lambda kv: -kv[1]):
+        if label not in out and name not in out.values():
+            out[label] = name
+    return out
+
+
+def _first_json_object(text: str) -> Optional[dict]:
+    """The first complete, parseable ``{…}`` in ``text`` (None if none yet)."""
+    import json
+
+    start = text.find("{")
+    while start != -1:
+        depth, in_str, esc = 0, False, False
+        for i in range(start, len(text)):
+            c = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(text[start:i + 1])
+                        return data if isinstance(data, dict) else None
+                    except ValueError:
+                        break
+        start = text.find("{", start + 1)
+    return None
 
 
 _SELF_INTRO = (r"i'?m", r"i am", r"my name is", r"this is", r"ich bin", r"ich heiße",

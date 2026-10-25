@@ -16,14 +16,15 @@ dependencies = [
     "soundfile>=0.12",
     # Apple Silicon: Metal-accelerated transcription via MLX.
     "mlx-whisper>=0.4.0",
-    # Local LLM summarization via MLX. 0.31.3+ adds the gemma4 + qwen3.5
-    # architectures used by the current summary-model lineup; older mlx-lm
-    # fails to load those repos with "Model type gemma4 not supported".
-    "mlx-lm>=0.31.3",
+    # (The summary LLM runs on llama.cpp's llama-server, fetched on first use
+    # — see meetre/gguf.py; mlx-lm is no longer needed.)
     # Alternative transcription backend: NVIDIA Parakeet TDT v3 on MLX
     # (multilingual, very fast). Selectable as the "parakeet-tdt-v3" model in the
     # menu/config — shipped by default so picking it needs no extra install.
     "parakeet-mlx>=0.4",
+    # Speaker voiceprints (NeMo TitaNet-small, ONNX on CPU) for splitting each
+    # side into people — no torch, no HuggingFace token (see voices.py).
+    "sherpa-onnx>=1.12",
 ]
 
 [project.optional-dependencies]

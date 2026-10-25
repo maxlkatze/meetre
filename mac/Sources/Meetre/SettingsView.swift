@@ -157,6 +157,85 @@ private struct SummaryPane: View {
                 Text("Leave unchanged to use the built-in prompt, tuned for K2 Horizon.")
                     .foregroundStyle(.secondary)
             }
+            Section {
+                LabeledContent("Folder") {
+                    HStack(spacing: Theme.Space.s) {
+                        Text(model.config["gguf_folder"]?.string ?? "~/models")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                        Button("Choose…", action: chooseGGUFFolder)
+                    }
+                }
+            } header: {
+                Text("Local GGUF models")
+            } footer: {
+                Text("GGUF files in this folder (and its subfolders) appear in the model list and run with llama.cpp's llama-server.")
+                    .foregroundStyle(.secondary)
+            }
+            DownloadedModelsSection()
+        }
+    }
+
+    private func chooseGGUFFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        if panel.runModal() == .OK, let url = panel.url {
+            model.set("gguf_folder", .string(url.path))
+        }
+    }
+}
+
+/// Models meetre downloaded, with sizes and a delete button. Other apps'
+/// models in the shared Hugging Face cache and local GGUF files aren't listed.
+private struct DownloadedModelsSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var models: [DownloadedModel] = []
+    @State private var confirm: DownloadedModel?
+
+    var body: some View {
+        Section {
+            if models.isEmpty {
+                Text("No downloaded models.").foregroundStyle(.secondary)
+            }
+            ForEach(models) { m in
+                HStack {
+                    VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                        Text(m.label)
+                        Text(m.kind == "asr" ? "Transcription"
+                             : m.kind == "legacy" ? "MLX — no longer used" : "Summary (GGUF)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(m.sizeBytes), countStyle: .file))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button("Delete", role: .destructive) { confirm = m }
+                        .disabled(m.inUse == true)
+                        .help(m.inUse == true ? "In use — pick another model first" : "Delete this download")
+                }
+            }
+        } header: {
+            Text("Downloaded models")
+        } footer: {
+            Text("A deleted model downloads again if you pick it later.")
+                .foregroundStyle(.secondary)
+        }
+        .task { models = await model.downloadedModels() }
+        .confirmationDialog("Delete \(confirm?.label ?? "")?", isPresented: Binding(
+            get: { confirm != nil }, set: { if !$0 { confirm = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                guard let m = confirm else { return }
+                Task {
+                    await model.deleteModel(m.id)
+                    models = await model.downloadedModels()
+                }
+            }
+        } message: {
+            Text("Frees \(ByteCountFormatter.string(fromByteCount: Int64(confirm?.sizeBytes ?? 0), countStyle: .file)).")
         }
     }
 }
@@ -169,6 +248,7 @@ private struct SummaryModelLabel: View {
             Text(model.label ?? model.id)
             if let gb = model.sizeGb { Text(String(format: "%.1f GB", gb)).foregroundStyle(.secondary) }
             if model.recommended == true { Text("· recommended").foregroundStyle(.secondary) }
+            if model.local == true { Text("· GGUF").foregroundStyle(.secondary) }
             if model.fits == false { Text("· too large").foregroundStyle(.secondary) }
         }
     }

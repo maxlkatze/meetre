@@ -44,45 +44,83 @@ def _load_audio(audio_path) -> "object":
 # VAD
 # ---------------------------------------------------------------------------
 
-def speech_regions(audio_path) -> List[tuple]:
-    """Speech intervals ``[(start_s, end_s), …]`` via Silero VAD ([] on failure)."""
-    global _vad_model
-    try:
-        import torch
-        from silero_vad import get_speech_timestamps, load_silero_vad
-
-        if _vad_model is None:
-            _vad_model = load_silero_vad()
-        audio = _load_audio(audio_path)
-        ts = get_speech_timestamps(
-            torch.from_numpy(audio), _vad_model, sampling_rate=_SR, return_seconds=True
-        )
-        return [(float(t["start"]), float(t["end"])) for t in ts]
-    except Exception:  # noqa: BLE001
-        return []
-
-
+_SILERO_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+               "asr-models/silero_vad.onnx")
+_SILERO_PATH = Path.home() / ".cache" / "meetre" / "vad" / "silero_vad.onnx"
 _vad_lock = threading.Lock()
+
+
+def _regions_torch(audio) -> List[tuple]:
+    global _vad_model
+    import numpy as np
+    # silero first: without it, importing torch only loads torch's libomp,
+    # which then clashes with numba's (Whisper word timings) and aborts.
+    from silero_vad import get_speech_timestamps, load_silero_vad
+    import torch
+
+    if _vad_model is None:
+        _vad_model = load_silero_vad()
+    ts = get_speech_timestamps(
+        torch.from_numpy(np.ascontiguousarray(audio, dtype="float32")), _vad_model,
+        sampling_rate=_SR, return_seconds=True)
+    return [(float(t["start"]), float(t["end"])) for t in ts]
+
+
+def _regions_onnx(audio) -> List[tuple]:
+    """Same Silero model through sherpa-onnx (a base dependency): no torch."""
+    import urllib.request
+
+    import numpy as np
+    import sherpa_onnx
+
+    if not _SILERO_PATH.exists():
+        _SILERO_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SILERO_PATH.with_suffix(".part")
+        urllib.request.urlretrieve(_SILERO_URL, tmp)
+        tmp.rename(_SILERO_PATH)
+    cfg = sherpa_onnx.VadModelConfig()
+    cfg.silero_vad.model = str(_SILERO_PATH)
+    cfg.silero_vad.min_silence_duration = 0.25
+    cfg.silero_vad.max_speech_duration = 60.0
+    cfg.sample_rate = _SR
+    cfg.num_threads = 1  # onnxruntime spin-waits with more threads
+    audio = np.ascontiguousarray(audio, dtype="float32")
+    vad = sherpa_onnx.VoiceActivityDetector(cfg, buffer_size_in_seconds=len(audio) / _SR + 5)
+    out: List[tuple] = []
+
+    def drain():
+        while not vad.empty():
+            seg = vad.front
+            out.append((seg.start / _SR, (seg.start + len(seg.samples)) / _SR))
+            vad.pop()
+
+    win = cfg.silero_vad.window_size
+    for i in range(0, len(audio), win):
+        vad.accept_waveform(audio[i:i + win])
+        drain()
+    vad.flush()
+    drain()
+    return out
 
 
 def speech_regions_array(audio) -> Optional[List[tuple]]:
     """Speech intervals in a 16 kHz float32 array; None if VAD is unavailable
     (callers then fall back to not filtering)."""
-    global _vad_model
-    try:
-        import numpy as np
-        import torch
-        from silero_vad import get_speech_timestamps, load_silero_vad
+    with _vad_lock:  # one model, shared by live captions and the final pass
+        for impl in (_regions_torch, _regions_onnx):
+            try:
+                return impl(audio)
+            except Exception:  # noqa: BLE001
+                continue
+    return None
 
-        with _vad_lock:  # one model, shared by live captions and the final pass
-            if _vad_model is None:
-                _vad_model = load_silero_vad()
-            ts = get_speech_timestamps(
-                torch.from_numpy(np.ascontiguousarray(audio, dtype="float32")), _vad_model,
-                sampling_rate=_SR, return_seconds=True)
-        return [(float(t["start"]), float(t["end"])) for t in ts]
+
+def speech_regions(audio_path) -> List[tuple]:
+    """Speech intervals ``[(start_s, end_s), …]`` via Silero VAD ([] on failure)."""
+    try:
+        return speech_regions_array(_load_audio(audio_path)) or []
     except Exception:  # noqa: BLE001
-        return None
+        return []
 
 
 def filter_silence(segments: list, audio_path) -> list:

@@ -11,6 +11,7 @@ Backends, tried in order of preference:
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -21,6 +22,10 @@ from .mlxthread import on_mlx_thread
 # local-only, so disable them before pyannote is imported (setdefault keeps it
 # overridable for anyone who explicitly opts in).
 os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+# mlx-whisper's word timings use numba; its default threading layer loads an
+# OpenMP runtime that aborts the process ("OMP: Error #15") once torch's own
+# libomp is in. The DTW is single-threaded anyway.
+os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
 # Map friendly model sizes to the HuggingFace repos MLX uses.
 # large-v3-turbo is the recommended default on Apple Silicon: near-large-v3
@@ -109,7 +114,7 @@ def transcribe(
         return _transcribe_parakeet(audio_path, model, progress), "parakeet-tdt-v3"
     backend = available_backend()
     if backend == "mlx-whisper":
-        segs = _transcribe_mlx(audio_path, model, language, progress)
+        segs = _transcribe_mlx(audio_path, model, language, progress, vad=vad)
     elif backend == "faster-whisper":
         # faster-whisper already VAD-filters internally (vad_filter=True).
         segs = _transcribe_faster(audio_path, model, language, compute_type, progress)
@@ -211,28 +216,75 @@ def _load_audio_16k(audio_path):
     return np.ascontiguousarray(data, dtype="float32")
 
 
+def speech_chunks(audio, regions, max_len: float = 30.0, pad: float = 0.2,
+                  join_gap: float = 1.0) -> List[Tuple[float, float]]:
+    """Speech regions merged into ``(start, end)`` chunks of ≤ ``max_len`` s
+    (gaps < ``join_gap`` s joined, ``pad`` s of context on each side)."""
+    dur = len(audio) / 16_000
+    chunks: List[list] = []
+    for b, e in regions:
+        b, e = max(0.0, b - pad), min(dur, e + pad)
+        if chunks and b - chunks[-1][1] < join_gap and e - chunks[-1][0] <= max_len:
+            chunks[-1][1] = max(chunks[-1][1], e)
+        else:
+            while e - b > max_len:  # one very long region: hard cuts
+                chunks.append([b, b + max_len])
+                b += max_len
+            chunks.append([b, e])
+    return [(b, e) for b, e in chunks]
+
+
 @on_mlx_thread
-def _transcribe_mlx(audio_path, model, language, progress) -> List[Segment]:
+def _transcribe_mlx(audio_path, model, language, progress, vad: bool = False) -> List[Segment]:
     import mlx_whisper
 
     repo = MLX_REPOS.get(model, MLX_REPOS["base"])
     # Decode the audio ourselves so mlx-whisper never invokes ffmpeg.
     audio = _load_audio_16k(audio_path)
-    result = mlx_whisper.transcribe(
-        audio,
-        path_or_hf_repo=repo,
-        language=language,
-        initial_prompt=_initial_prompt(language),
-        condition_on_previous_text=True,
-        word_timestamps=False,
-    )
-    segs = result.get("segments", [])
-    total = segs[-1]["end"] if segs else 0.0
+    total = len(audio) / 16_000
+
+    from .downloads import local_first
+
+    def run(clip, condition, words=False):
+        # Short clips echo the style prompt back as text ("… Umlauten und
+        # Satzzeichen."), so only longer ones get it.
+        prompt = _initial_prompt(language) if len(clip) >= 8 * 16_000 else None
+        return local_first(lambda: mlx_whisper.transcribe(
+            clip, path_or_hf_repo=repo, language=language,
+            initial_prompt=prompt,
+            condition_on_previous_text=condition, word_timestamps=words,
+        )).get("segments", [])
+
+    # Whisper invents text in silence ("Vielen Dank.", "Bye-bye.": 37 of 961
+    # segments on real calls, most surviving the VAD post-filter because they
+    # overlap a little speech). With VAD on, only speech chunks are decoded —
+    # which also skips the silent half of each stem.
+    regions = None
+    if vad:
+        from .align import _load_audio, speech_regions_array
+        regions = speech_regions_array(_load_audio(audio_path))
     out: List[Segment] = []
-    for s in segs:
-        out.append(Segment(start=s["start"], end=s["end"], text=s["text"].strip()))
+    if regions is None:
+        for s in run(audio, True):
+            out.append(Segment(start=s["start"], end=s["end"], text=s["text"].strip()))
+            if progress is not None:
+                progress(s["end"], total)
+        return out
+    for b, e in speech_chunks(audio, regions):
+        # Word timings: Whisper's own segment times inside a chunk can be
+        # invented (eight one-word lines exactly 1.0 s apart); words are real
+        # and let speaker changes split a line.
+        for s in run(audio[int(b * 16_000):int(e * 16_000)], False, words=True):
+            text = s["text"].strip()
+            if not text:
+                continue
+            ws = [{"word": w["word"], "start": b + w["start"], "end": min(e, b + w["end"])}
+                  for w in s.get("words") or []]
+            start, end = (ws[0]["start"], ws[-1]["end"]) if ws else \
+                (b + s["start"], min(e, b + s["end"]))
+            out.append(Segment(start=start, end=end, text=text, words=ws or None))
         if progress is not None:
-            progress(s["end"], total)
+            progress(e, total)
     return out
 
 
@@ -303,6 +355,34 @@ def _parakeet_load_audio(filename, sampling_rate, dtype=None):
 _parakeet_cache: dict = {}
 
 
+@on_mlx_thread
+def release_models() -> None:
+    """Free the transcription models (and the Metal buffers they hold) once a
+    meeting is processed: the engine otherwise kept ~2.8 GB resident while
+    idle. Reloading from disk takes a second or two at the next recording."""
+    import gc
+
+    _parakeet_cache.clear()
+    _pipeline_cache.clear()
+    try:
+        from mlx_whisper.transcribe import ModelHolder
+
+        ModelHolder.model = ModelHolder.model_path = None
+    except Exception:  # noqa: BLE001
+        pass
+    from . import align, voices
+
+    voices._extractor = None
+    align._vad_model = None
+    gc.collect()
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def load_parakeet(repo: str):
     """Load (and cache) a Parakeet model, patching out its ffmpeg dependency."""
     try:
@@ -317,7 +397,9 @@ def load_parakeet(repo: str):
     # file loading through soundfile instead.
     parakeet_mlx.parakeet.load_audio = _parakeet_load_audio
     if repo not in _parakeet_cache:
-        _parakeet_cache[repo] = from_pretrained(repo)
+        from .downloads import local_first
+
+        _parakeet_cache[repo] = local_first(lambda: from_pretrained(repo))
     return _parakeet_cache[repo]
 
 
@@ -481,8 +563,28 @@ def transcribe_attributed(
 
         sys_segs, backend = transcribe(Path(stems["system"]), model, language, compute_type,
                                        progress=_part(0), vad=vad, word_align=word_align)
-        mic_segs, backend = transcribe(Path(stems["mic"]), model, language, compute_type,
-                                       progress=_part(1), vad=vad, word_align=word_align)
+        # Speakers → mic echo: subtract the call (its own stem) from the mic
+        # before transcribing it (18 dB less echo on synced recordings).
+        mic_path = Path(stems["mic"])
+        try:
+            from . import echo
+
+            cleaned = echo.clean_stem(mic, system)
+        except Exception as e:  # noqa: BLE001 — fall back to the raw mic
+            print(f"meetre: echo removal failed: {e}", file=sys.stderr)
+            cleaned = None
+        if cleaned is not None:
+            import tempfile
+
+            mic = cleaned
+            mic_path = Path(tempfile.mktemp(suffix="_meetre_mic_clean.wav"))
+            sf.write(str(mic_path), cleaned, 16_000, subtype="PCM_16")
+        try:
+            mic_segs, backend = transcribe(mic_path, model, language, compute_type,
+                                           progress=_part(1), vad=vad, word_align=word_align)
+        finally:
+            if cleaned is not None:
+                mic_path.unlink(missing_ok=True)
         # The mic has faint residual sound that ASR happily "hears" words in;
         # keep only segments where VAD finds speech (as the live captions do).
         regions = speech_regions_array(mic)
@@ -509,7 +611,29 @@ def transcribe_attributed(
         on_transcribed(segments)
 
     # 2) Split each side into individual people (side labels stay otherwise).
-    if detect_speakers and merged_analysis:
+    from . import voices
+    if detect_speakers and voices.available():
+        # Voiceprints of the transcribed segments, clustered per side: a few
+        # seconds for a 25 min call (pyannote: ~45 s) and no HF token. Also
+        # drops mic segments that are the call's voice coming through the
+        # speakers. ``num_speakers`` counts everyone, you included.
+        # Who is in the room vs. on the call isn't known up front, so with
+        # both sides the call's voices are counted first and the mic gets
+        # the rest (`n_total`).
+        try:
+            if mic is not None and system is not None:
+                mic_segs, sys_segs = voices.split_sides(mic, mic_segs, system, sys_segs,
+                                                        lbl, n_total=num_speakers)
+                segments = sorted(sys_segs + mic_segs, key=lambda s: (s.start, s.end))
+            elif mic is not None:
+                segments = voices.split_side(mic, segments, lbl["local"],
+                                             lbl["local_multi"], n=num_speakers)
+            else:
+                segments = voices.split_side(system, segments, lbl["remote"],
+                                             lbl["remote_multi"], n=num_speakers)
+        except Exception as e:  # noqa: BLE001 — keep the side labels
+            print(f"meetre: voice split failed: {e}", file=sys.stderr)
+    elif detect_speakers and merged_analysis:
         # One analysis on the mixed audio; reuse the same turns for both sides.
         try:
             turns = diarize_turns(mix_path, hf_token, num_speakers, min_speakers,
@@ -541,6 +665,9 @@ def transcribe_attributed(
 
 def diarization_ready(hf_token: Optional[str]) -> Tuple[bool, Optional[str]]:
     """Return (ready, reason_if_not) for speaker detection."""
+    from . import voices
+    if voices.available():
+        return True, None  # voiceprints: no pyannote, no token needed
     try:
         import pyannote.audio  # noqa: F401
     except ImportError:
@@ -769,7 +896,21 @@ def diarize(
     max_speakers: Optional[int] = None,
     progress=None,
 ) -> List[Segment]:
-    """Assign a "Speaker N" label to each segment using pyannote on one file."""
+    """Assign a "Speaker N" label to each segment of one file: voiceprints
+    (:mod:`voices`) when sherpa-onnx is installed, else pyannote."""
+    from . import voices
+    if voices.available():
+        import numpy as np
+        import soundfile as sf
+
+        audio, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        if sr != voices.SR and len(audio):
+            n = int(round(len(audio) * voices.SR / sr))
+            audio = np.interp(np.linspace(0, len(audio), n, endpoint=False),
+                              np.arange(len(audio)), audio).astype("float32")
+        return voices.split_side(audio, segments, "Speaker 1", "Speaker", n=num_speakers)
     turns = diarize_turns(audio_path, hf_token, num_speakers, min_speakers,
                           max_speakers, progress=progress)
     # Split sentences at speaker changes using word timings, so a sentence

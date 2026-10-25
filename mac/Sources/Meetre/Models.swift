@@ -113,6 +113,14 @@ struct Turn: Codable, Sendable, Hashable {
     var speaker: String?
     var start: Double?
     var text: String
+    /// Timed words for playback highlighting (estimated for old transcripts).
+    var words: [Word]? = nil
+}
+
+struct Word: Codable, Sendable, Hashable {
+    var w: String
+    var s: Double
+    var e: Double
 }
 
 struct Meeting: Codable, Sendable, Identifiable, Hashable {
@@ -126,6 +134,8 @@ struct Meeting: Codable, Sendable, Identifiable, Hashable {
     var summaryMd: String?
     var sections: MeetingSections?
     var turns: [Turn]?
+    /// The MP3 backup, for listening back in the transcript.
+    var audio: String? = nil
     var model: String?
     var backend: String?
 
@@ -152,6 +162,16 @@ struct SummaryModel: Codable, Sendable, Identifiable, Hashable {
     var fits: Bool?
     var installed: Bool?
     var recommended: Bool?
+    /// A GGUF file from the local models folder (run with llama.cpp).
+    var local: Bool?
+}
+
+struct DownloadedModel: Codable, Sendable, Identifiable, Hashable {
+    var id: String
+    var label: String
+    var sizeBytes: Double
+    var kind: String
+    var inUse: Bool?
 }
 
 struct Language: Codable, Sendable, Identifiable, Hashable {

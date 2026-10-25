@@ -10,9 +10,9 @@ Guidance for working in this repository.
 
 macOS-only meeting recorder + transcriber. Captures microphone and system audio
 (Zoom/Meet/Teams), transcribes locally with Whisper or Parakeet (Metal/MLX),
-optionally labels speakers (pyannote diarization), and summarizes with a local
-LLM (Qwen3.5 / Gemma 4 / Mistral via MLX-LM). Everything runs on-device — no
-audio or text leaves the machine.
+labels speakers (TitaNet voiceprints via sherpa-onnx), and summarizes with a
+local LLM (Gemma 4 / K2 Horizon / Qwen3.5 GGUF via llama.cpp's llama-server).
+Everything runs on-device — no audio or text leaves the machine.
 
 - Python 3.11+. Source under `src/meetre/`. Package entry point: `meetre`.
 - Config: `~/.config/meetre/config.json` (`Config` dataclass in `config.py`).
@@ -43,13 +43,23 @@ sync, companion app plan). `mac/build.sh` → `mac/build/Meetre.app`. It spawns
   `_generate_title`.
 - `cli.py` — CLI subcommands (`main`, `do_record`, `do_transcribe`, `interactive`).
 - `config.py` — JSON config dataclass `Config` (`load`/`save`).
-- `recorder.py` — `Recorder`: mic (sounddevice) + system audio mixed to 16 kHz WAV;
-  `save_mp3`, `list_devices`.
+- `recorder.py` — `Recorder`: mic (sounddevice, device-native rate, kept on the
+  wall clock) + system audio mixed to 16 kHz WAV; `save_mp3`, `list_devices`.
 - `transcriber.py` — Whisper (MLX / faster-whisper) + pyannote diarization.
   `transcribe`, `transcribe_attributed`, `diarize`, `available_backend`, `Segment`.
-- `summarizer.py` — local MLX-LM summaries + title generation. `summarize`,
-  `generate_title`, model catalog/fit logic (`SUMMARY_MODELS`, `system_memory_gb`,
-  `model_fits`, `model_catalog`, `default_model`), model install/uninstall.
+- `summarizer.py` — summaries, titles, chat, speaker names (prompts + logic).
+  `summarize`, `generate_title`, `chat`, `infer_speaker_names`; catalog/fit logic
+  (`SUMMARY_MODELS`, `system_memory_gb`, `model_fits`, `default_model`),
+  `installed_models`/`uninstall_model` (meetre's downloads only).
+- `gguf.py` — the LLM runtime: llama-server per model (`load`, `chat`,
+  `complete`), downloadable `CATALOG` → `~/models/<family>/` (pinned commits,
+  SHA-256), `.meetre-downloads.json` manifest, pinned llama.cpp build fetched
+  into `~/models/.llama.cpp` when none is installed (`LLAMA_BUILD`).
+- `voices.py` — speaker split per side: TitaNet voiceprints per segment,
+  clustering, a per-second voice track that splits mixed lines, echo-voice
+  removal (`split_sides`, `split_side`).
+- `echo.py` — offline echo removal: subtracts the call stem from the mic
+  (delay tracking + NLMS + residual suppression; `clean_stem`).
 - `transcript.py` — render speaker-labelled Markdown transcript (`write_transcript`).
 - `integrations.py` — Apple Notes (`add_to_apple_notes`) + Claude Desktop hand-off.
 - `align.py` — Silero VAD + phoneme forced alignment for Whisper segments.
@@ -81,24 +91,42 @@ sync, companion app plan). `mac/build.sh` → `mac/build/Meetre.app`. It spawns
   if RAM reads as 0 the model-fit check would treat *every* model as fitting and
   fail to gray out oversized ones in the menu. Don't reintroduce a PATH-relative
   subprocess for hardware detection.
-- Summary/title generation needs `mlx-lm`; gated on `summarizer.available()`.
-  "Record with previous" skips the settings dialog and derives the meeting title
+- "Record with previous" skips the settings dialog and derives the meeting title
   from the summary (`_auto_title` → `_generate_title`) to name the transcript/Note.
-- **Diarization runs on MPS.** pyannote defaults to CPU; `_load_pipeline` moves
-  it to Metal (~12x faster) and caches it per process, retrying on CPU if an op
-  fails on MPS. The menubar `_finish` publishes progressively via `_publish`:
+- **Speakers come from voiceprints, not pyannote** (`voices.py`; pyannote is
+  only a fallback without sherpa-onnx). The side (you vs. call) is known from
+  the stems; within a side, segments ≥ 0.8 s get a TitaNet print, clustered at
+  0.4 (same person over a call scores 0.4-0.7, different people 0.0-0.35); with
+  several voices every second is matched again so mixed lines split
+  (`split_by_turns`). ~8 s for a 25-min call. `num_speakers` counts everyone:
+  call voices first, the mic gets the rest. The menubar `_finish` publishes progressively via `_publish`:
   transcript (.md + Apple Note) right after ASR, rewritten in place after
   speakers, then after summary/title (`update_apple_note`).
-- **K2 Horizon 7B is the preferred summary model** (`_BEST_FIRST[0]`). mlx-lm has
-  no native `k2_horizon` arch; the repo ships `k2_horizon.py` that mlx-lm executes
-  on load, so the spec pins `revision` to a reviewed commit (honored by
-  `downloads.ensure_model` and `load(..., revision=)`). Re-review that file before
-  bumping the pin. K2 always reasons (`<ifm|think…>` tags); use
+- **The LLM is GGUF-only (llama-server), since 2026-10-25.** Measured on 4 real
+  German meetings: as fast as MLX or faster, titles 2-3× faster (prompt cache),
+  and only llama-server can force output shape (`json_schema`). Gemma 4 12B QAT
+  is `_BEST_FIRST[0]`: 37 tok/s like K2 Q8, 8.9 GB vs 11.4 GB, and the only one
+  keeping unsettled points out of "Entscheidungen". Context is 16k (32k cost
+  K2 2.2 GB more, same output). Server flags from LocalCompanion: `-fa on`,
+  `--ctx-checkpoints 2 --cache-ram 512` (defaults grew it to 12.6 GB), tied to
+  our pid. `gguf._chat` must close the think block before any answer text —
+  K2 on "low" doesn't reason, and every summary came back empty without it.
+- **Speaker names: the model only reads lines, code assigns.** It lists name
+  mentions (quote, said_by, name, use) under a forced schema; asked to map
+  labels to names directly, every model gave the name to whoever SAYS it.
+  `_names_from_mentions`: addressed → the other speaker, self-intro → the
+  speaker, talked about → nobody.
+- K2 always reasons (`<ifm|think…>` tags); use
   `reasoning_effort="low"`. Note "low" = *no* reasoning (K2 closes the think
   block at once). Re-measured 2026-10-15 on 1–31 min meetings: medium is
   2.5–13× slower (165 s for 31 min) with worse owners/phrasing; high took
   60–214 s, truncated one answer and looped forever on a misheard word in
   another. Keep "low" unless a new model/prompt is re-benchmarked.
+- **Echo**: macOS Voice Processing for the mic stays off during calls (commit
+  99a2bf1 reports other apps heard the mic ~35 dB quieter — not re-verified;
+  meetre's own AGC/level handling may have caused it). `echo.clean_stem` removes it
+  offline (18 dB on synced stems); recordings before the mic-clock fix drift
+  (mic lost ~1 % of samples) and are left alone.
 - **Summary prompt is tuned for K2** (benchmarked on real 1–31 min meetings).
   Default prompt goes *after* the transcript (compacted to one `Speaker: text`
   line per turn by `compact_transcript`); custom prompts keep instruction-first.

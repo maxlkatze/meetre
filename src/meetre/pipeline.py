@@ -18,14 +18,15 @@ from typing import Callable, List, Optional
 def summary_error_hint(e: Exception) -> str:
     """Turn a raw summarizer error into an actionable message.
 
-    The most common one is an mlx-lm too old for a newer architecture (e.g.
-    'Model type gemma4 not supported'), which otherwise surfaces as a fleeting
-    failure and an empty summary. Point the user at the update path instead.
+    The most common one is a llama.cpp too old for a newer architecture
+    ("unknown model architecture"), which otherwise surfaces as a fleeting
+    failure and an empty summary.
     """
     msg = str(e)
     low = msg.lower()
-    if "not supported" in low or "model type" in low or "unknown model" in low:
-        return ("This model needs a newer mlx-lm. Run 'meetre update', or pick "
+    if "unknown model architecture" in low or "unknown architecture" in low:
+        return ("This model needs a newer llama.cpp: update it (brew upgrade llama.cpp, "
+                "or delete ~/models/.llama.cpp so meetre fetches the latest), or pick "
                 "another summary model. (" + msg + ")")
     return msg
 
@@ -403,7 +404,7 @@ class Pipeline:
         title (auto-titling) renames the file.
         """
         from . import integrations, summarizer
-        from .transcript import write_transcript
+        from .transcript import move_words, write_transcript
 
         cfg = self.cfg
         path = write_transcript(
@@ -415,6 +416,7 @@ class Pipeline:
         old = out["path"]
         if old is not None and old != path:
             old.unlink(missing_ok=True)
+            move_words(old, None)
         out["path"] = path
 
         if cfg.auto_notes and out["note"] != "failed":
@@ -580,7 +582,7 @@ class Pipeline:
         import tempfile
 
         from . import summarizer, transcriber
-        from .transcript import write_transcript
+        from .transcript import move_words, write_transcript
 
         cfg = self.cfg
         md = path.read_text()
@@ -617,6 +619,7 @@ class Pipeline:
             backend=backend or "?", person_detection=persons, summary=summary)
         if new != path:
             path.unlink(missing_ok=True)
+            move_words(path, None)
         return new
 
     def import_audio(self, src: Path) -> Path:
