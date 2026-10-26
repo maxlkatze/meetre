@@ -217,7 +217,7 @@ def _load_audio_16k(audio_path):
 
 
 def speech_chunks(audio, regions, max_len: float = 30.0, pad: float = 0.2,
-                  join_gap: float = 1.0) -> List[Tuple[float, float]]:
+                  join_gap: float = 3.0) -> List[Tuple[float, float]]:
     """Speech regions merged into ``(start, end)`` chunks of ≤ ``max_len`` s
     (gaps < ``join_gap`` s joined, ``pad`` s of context on each side)."""
     dur = len(audio) / 16_000
@@ -253,7 +253,16 @@ def _transcribe_mlx(audio_path, model, language, progress, vad: bool = False) ->
             clip, path_or_hf_repo=repo, language=language,
             initial_prompt=prompt,
             condition_on_previous_text=condition, word_timestamps=words,
+            **({} if condition else {"temperature": 0.0}),
         )).get("segments", [])
+
+    def junk(s) -> bool:
+        # Greedy only on speech chunks: the temperature fallback re-decoded
+        # every looping clip up to 5× (31 s vs 11 s for a 7.7 min mic stem)
+        # and still returned "so, so, so …" / "1, 1, 1 …". Loops compress
+        # far better than speech; low-confidence non-speech is invented.
+        return (s.get("compression_ratio", 0) > 2.4
+                or (s.get("no_speech_prob", 0) > 0.6 and s.get("avg_logprob", 0) < -1.0))
 
     # Whisper invents text in silence ("Vielen Dank.", "Bye-bye.": 37 of 961
     # segments on real calls, most surviving the VAD post-filter because they
@@ -276,7 +285,7 @@ def _transcribe_mlx(audio_path, model, language, progress, vad: bool = False) ->
         # and let speaker changes split a line.
         for s in run(audio[int(b * 16_000):int(e * 16_000)], False, words=True):
             text = s["text"].strip()
-            if not text:
+            if not text or junk(s):
                 continue
             ws = [{"word": w["word"], "start": b + w["start"], "end": min(e, b + w["end"])}
                   for w in s.get("words") or []]
