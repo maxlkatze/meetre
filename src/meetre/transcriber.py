@@ -111,7 +111,7 @@ def transcribe(
     timestamps via phoneme forced alignment. Both apply to the Whisper path.
     """
     if is_parakeet(model):
-        return _transcribe_parakeet(audio_path, model, progress), "parakeet-tdt-v3"
+        return _transcribe_parakeet(audio_path, model, progress, vad=vad), "parakeet-tdt-v3"
     backend = available_backend()
     if backend == "mlx-whisper":
         segs = _transcribe_mlx(audio_path, model, language, progress, vad=vad)
@@ -413,9 +413,22 @@ def load_parakeet(repo: str):
 
 
 @on_mlx_thread
-def _transcribe_parakeet(audio_path, model, progress=None) -> List[Segment]:
+def _transcribe_parakeet(audio_path, model, progress=None, vad: bool = False) -> List[Segment]:
     repo = PARAKEET_MODELS.get(model, model)
     pk = load_parakeet(repo)
+
+    # With VAD, decode only the speech, in chunks of ≤ 60 s. One 120 s window
+    # over a real call lost all punctuation and casing after ~1 min (a single
+    # 105 s run-on "segment"), stretched sentence timings over the silence
+    # around them (which then gave one speaker two voiceprints), and dropped
+    # three of the mic's sentences; per-chunk decoding kept them all.
+    if vad:
+        from .align import _load_audio, speech_regions_array
+
+        audio = _load_audio(audio_path)
+        regions = speech_regions_array(audio)
+        if regions is not None:
+            return _parakeet_chunks(pk, audio, regions, progress)
 
     cb = None
     if progress is not None:
@@ -431,6 +444,33 @@ def _transcribe_parakeet(audio_path, model, progress=None) -> List[Segment]:
     ]
     if not out and result.text.strip():
         out.append(Segment(start=0.0, end=0.0, text=result.text.strip()))
+    return out
+
+
+def _parakeet_chunks(pk, audio, regions, progress=None) -> List[Segment]:
+    """Parakeet over the speech chunks of a 16 kHz array (greedy: beam search
+    was 3x slower and cut words off at sentence ends)."""
+    import mlx.core as mx
+    from parakeet_mlx.audio import get_logmel
+
+    total = len(audio) / 16_000
+    out: List[Segment] = []
+    for b, e in speech_chunks(audio, regions, max_len=60.0):
+        clip = audio[int(b * 16_000):int(e * 16_000)]
+        if len(clip) >= 16_000 // 4:
+            result = pk.generate(get_logmel(mx.array(clip), pk.preprocessor_config))[0]
+            for s in result.sentences:
+                text = s.text.strip()
+                if not text:
+                    continue
+                words = _parakeet_words(s.tokens) or []
+                for w in words:
+                    w["start"] += b
+                    w["end"] += b
+                out.append(Segment(start=b + float(s.start), end=b + float(s.end),
+                                   text=text, words=words or None))
+        if progress is not None:
+            progress(e, total)
     return out
 
 
@@ -582,6 +622,7 @@ def transcribe_attributed(
         except Exception as e:  # noqa: BLE001 — fall back to the raw mic
             print(f"meetre: echo removal failed: {e}", file=sys.stderr)
             cleaned = None
+        raw_mic = mic
         if cleaned is not None:
             import tempfile
 
@@ -601,6 +642,8 @@ def transcribe_attributed(
             mic_segs = [g for g in mic_segs
                         if any(min(g.end, e) - max(g.start, b) > 0.1 for b, e in regions)]
         mic_segs = drop_echo(mic_segs, sys_segs)
+        if cleaned is not None:
+            mic_segs = echo.drop_residue(raw_mic, cleaned, mic_segs, sys_segs)
         for s in sys_segs:
             s.speaker = lbl["remote"]
         for s in mic_segs:

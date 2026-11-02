@@ -110,12 +110,23 @@ def _cluster(prints: np.ndarray, n: Optional[int]) -> List[int]:
     return [ids[k] for k in owner.tolist()]
 
 
+def _speech(audio: np.ndarray, seg) -> np.ndarray:
+    """The segment's audio — only its words when it has word timings: an ASR
+    sentence can span seconds of silence or the other side's echo, and a print
+    of that is not the speaker's (one person became two "voices" that way)."""
+    if not seg.words:
+        return audio[int(seg.start * SR):int(seg.end * SR)]
+    parts = [audio[int(max(0.0, w["start"] - 0.05) * SR):int((w["end"] + 0.05) * SR)]
+             for w in seg.words]
+    return np.concatenate(parts) if parts else audio[:0]
+
+
 def _prints(audio: np.ndarray, segs: list) -> tuple:
-    long = [i for i, s in enumerate(segs) if s.end - s.start >= MIN_SECONDS]
+    clips = [_speech(audio, s) for s in segs]
+    long = [i for i, c in enumerate(clips) if len(c) >= MIN_SECONDS * SR]
     if not long:
         return long, np.zeros((0, 192), dtype="float32")
-    return long, np.stack([voiceprint(audio[int(segs[i].start * SR):int(segs[i].end * SR)])
-                           for i in long])
+    return long, np.stack([voiceprint(clips[i]) for i in long])
 
 
 def _voices(segs: list, long: list, prints: np.ndarray, n: Optional[int]) -> dict:
@@ -255,6 +266,9 @@ def split_sides(mic: np.ndarray, mic_segs: list, system: np.ndarray, sys_segs: l
     ≤ 0.35 for your own voice."""
     s_long, s_prints = _prints(system, sys_segs)
     s_raw = _voices(sys_segs, s_long, s_prints, None)
+    if n_total and mic_segs and len(set(s_raw.values())) > max(1, n_total - 1):
+        # Someone talks into the mic, so the call has at most everyone else.
+        s_raw = _voices(sys_segs, s_long, s_prints, max(1, n_total - 1))
     n_local = None
     if n_total:  # everyone not heard on the call is in the room
         n_local = max(1, n_total - (len(set(s_raw.values())) if s_raw else 0))

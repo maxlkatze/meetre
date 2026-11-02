@@ -172,3 +172,27 @@ def clean_stem(mic: np.ndarray, ref: np.ndarray) -> Optional[np.ndarray]:
     if lag is None or float(lag.max() - lag.min()) > STABLE * SR:
         return None
     return cancel(mic, ref, delay=int(np.median(lag)))
+
+
+# Mic lines whose audio the canceller took this much out of (while the call
+# talked) were the call itself: on three real calls echo lines lost 13-28 dB,
+# your own lines at most 8.7 dB, even while talking over the call. The words
+# ASR still found in the residue were made up ("That's too much of a.").
+ECHO_REMOVED_DB = 12.0
+
+
+def _level(audio: np.ndarray, seg) -> float:
+    spans = [(w["start"], w["end"]) for w in seg.words] if seg.words else [(seg.start, seg.end)]
+    x = np.concatenate([audio[int(b * SR):int(e * SR)] for b, e in spans] or [audio[:0]])
+    return 10 * np.log10(float(np.mean(x * x)) + 1e-12) if len(x) else -120.0
+
+
+def drop_residue(raw: np.ndarray, cleaned: np.ndarray, mic_segs: list, sys_segs: list) -> list:
+    """``mic_segs`` (transcribed from ``cleaned``) minus the lines that were
+    mostly the call's echo in ``raw`` — those overlapping call speech that the
+    canceller removed ≥ ECHO_REMOVED_DB from."""
+    def talking(g):
+        return any(min(g.end, s.end) - max(g.start, s.start) > 0 for s in sys_segs)
+
+    return [g for g in mic_segs
+            if not (talking(g) and _level(raw, g) - _level(cleaned, g) >= ECHO_REMOVED_DB)]

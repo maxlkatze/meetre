@@ -111,6 +111,15 @@ sync, companion app plan). `mac/build.sh` → `mac/build/Meetre.app`. It spawns
   `--ctx-checkpoints 2 --cache-ram 512` (defaults grew it to 12.6 GB), tied to
   our pid. `gguf._chat` must close the think block before any answer text —
   K2 on "low" doesn't reason, and every summary came back empty without it.
+- **Parakeet decodes VAD speech chunks (≤ 60 s), not 120 s windows**
+  (`_parakeet_chunks`, when `vad` is on). Measured 2026-11-02 on a real call:
+  the 120 s pass made one 105 s run-on without punctuation, stretched sentence
+  timings over silence and dropped 3 mic sentences. Voiceprints use only the
+  words' audio (`voices._speech`): stretched segments gave one person two
+  "voices". With `num_speakers`, the call side gets at most n − 1 voices.
+- **Echo residue**: mic lines overlapping call speech that `echo.clean_stem`
+  took ≥ 12 dB out of are dropped (`echo.drop_residue`): echo lines lost
+  13-28 dB, real lines ≤ 8.7 dB on 3 calls; ASR invented words in the residue.
 - **Speaker names: the model only reads lines, code assigns.** It lists name
   mentions (quote, said_by, name, use) under a forced schema; asked to map
   labels to names directly, every model gave the name to whoever SAYS it.
