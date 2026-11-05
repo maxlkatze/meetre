@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -60,6 +60,9 @@ class Segment:
     speaker: Optional[str] = None
     # Optional per-word timing from phoneme alignment: [{"word","start","end"}, …]
     words: Optional[list] = None
+    # The speaker's voiceprint (unit vector, set by voices.py) — for
+    # recognising the voice in later meetings (voicebook.py).
+    voice: Optional[object] = field(default=None, repr=False, compare=False)
 
 
 # Alternative backend: NVIDIA Parakeet TDT v3 on MLX (multilingual, very fast,

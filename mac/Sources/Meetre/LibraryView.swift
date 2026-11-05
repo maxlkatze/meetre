@@ -273,7 +273,7 @@ struct MeetingDetail: View {
         .confirmationDialog("Transcribe “\(meeting.title)” again?", isPresented: $confirmRetranscribe) {
             Button("Transcribe again", action: model.transcribeAgain)
         } message: {
-            Text("The transcript and summary are replaced with a fresh pass over the audio backup.")
+            Text("The transcript and summary are replaced with a fresh pass over the audio backup. Speakers are detected automatically; voices you named before are recognised.")
         }
         .onAppear { title = meeting.title }
     }
@@ -307,12 +307,56 @@ struct MeetingDetail: View {
             if let speakers = meeting.speakers, !speakers.isEmpty {
                 HStack(spacing: Theme.Space.xs) {
                     ForEach(speakers, id: \.self) { s in
-                        SpeakerChip(name: s, color: palette.color(for: s))
+                        RenameSpeakerChip(name: s, color: palette.color(for: s))
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A speaker chip in the meeting header: click to name the speaker. With
+/// "Remember this voice" the voice is recognised in later meetings.
+struct RenameSpeakerChip: View {
+    var name: String
+    var color: Color
+    @Environment(AppModel.self) private var model
+    @State private var editing = false
+    @State private var newName = ""
+    @State private var remember = true
+
+    var body: some View {
+        Button { newName = name; remember = true; editing = true } label: {
+            SpeakerChip(name: name, color: color)
+        }
+        .buttonStyle(.plain)
+        .help("Name this speaker")
+        .popover(isPresented: $editing, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                Text("Name speaker").font(.headline)
+                TextField("Name", text: $newName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 220)
+                    .onSubmit(commit)
+                Toggle("Remember this voice", isOn: $remember)
+                    .help("Recognise this person by voice in future meetings")
+                HStack {
+                    Spacer()
+                    Button("Cancel") { editing = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Rename", action: commit)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(Theme.Space.m)
+        }
+    }
+
+    private func commit() {
+        editing = false
+        model.renameSpeaker(name, to: newName, remember: remember)
     }
 }
 

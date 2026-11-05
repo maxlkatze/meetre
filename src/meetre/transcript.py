@@ -62,6 +62,9 @@ def write_transcript(
     lines.append("")
     path.write_text("\n".join(lines))
     write_words(path, segments)
+    from .voicebook import write_sidecar
+
+    write_sidecar(path, segments)
     return path
 
 
@@ -90,14 +93,18 @@ def write_words(md: Path, segments: List[Segment]) -> None:
 
 
 def move_words(old: Path, new: Path) -> None:
-    """Keep the sidecar with its transcript (``new=None`` deletes it)."""
-    src = words_path(old)
-    if not src.exists():
-        return
-    if new is None:
-        src.unlink(missing_ok=True)
-    else:
-        src.replace(words_path(new))
+    """Keep the sidecars (word timings, voiceprints) with their transcript
+    (``new=None`` deletes them)."""
+    from .voicebook import sidecar_path
+
+    for side in (words_path, sidecar_path):
+        src = side(old)
+        if not src.exists():
+            continue
+        if new is None:
+            src.unlink(missing_ok=True)
+        else:
+            src.replace(side(new))
 
 
 def _slugify(text: str) -> str:

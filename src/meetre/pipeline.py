@@ -342,9 +342,12 @@ class Pipeline:
             hooks.notify("meetre", "Recording failed", str(e))
             return None
 
-    def transcribe_audio(self, mix: Path, stems: dict, on_early=None):
+    def transcribe_audio(self, mix: Path, stems: dict, on_early=None, *,
+                         auto_speakers: bool = False):
         """Transcribe a recording, splitting speakers when person detection is
-        on. Returns ``(segments, backend, persons)``.
+        on. Returns ``(segments, backend, persons)``. ``auto_speakers`` ignores
+        the configured speaker count (re-transcribing: the count picked for
+        the recording may have been wrong — find the voices from the audio).
 
         With both stems, each source is transcribed on its own (you vs. the
         call); otherwise the mix is transcribed and pyannote labels it.
@@ -354,6 +357,8 @@ class Pipeline:
 
         cfg, hooks = self.cfg, self.hooks
         use_persons = cfg.person_detection
+        n, lo, hi = ((None, None, None) if auto_speakers
+                     else (cfg.num_speakers, cfg.min_speakers, cfg.max_speakers))
         hooks.stage("Transcribing…")
         if "mic" in stems and "system" in stems:
             def on_transcribed(segs):
@@ -365,8 +370,8 @@ class Pipeline:
             segments, backend = transcriber.transcribe_attributed(
                 mix, stems, model=cfg.model, language=cfg.language,
                 compute_type=cfg.compute_type, detect_speakers=use_persons,
-                hf_token=cfg.hf_token, num_speakers=cfg.num_speakers,
-                min_speakers=cfg.min_speakers, max_speakers=cfg.max_speakers,
+                hf_token=cfg.hf_token, num_speakers=n,
+                min_speakers=lo, max_speakers=hi,
                 progress=self.tx_progress, diar_progress=hooks.progress,
                 vad=cfg.vad, word_align=cfg.word_timestamps,
                 merged_analysis=cfg.merged_analysis,
@@ -385,9 +390,7 @@ class Pipeline:
             try:
                 segments = transcriber.diarize(
                     mix, segments, cfg.hf_token,
-                    num_speakers=cfg.num_speakers,
-                    min_speakers=cfg.min_speakers,
-                    max_speakers=cfg.max_speakers,
+                    num_speakers=n, min_speakers=lo, max_speakers=hi,
                     progress=hooks.progress,
                 )
             except RuntimeError as e:
@@ -440,16 +443,22 @@ class Pipeline:
     def name_speakers(self, segments) -> None:
         """Replace anonymous speaker labels with real names, in place.
 
-        Your own side ("Me"/"Ich") becomes ``cfg.my_name``; the other labels are
-        named by the local LLM from explicit evidence in the conversation
-        (introductions, being addressed by name), verified against the text.
+        Voices saved in the voice book (named by renaming a speaker earlier)
+        come first; then your own side ("Me"/"Ich") becomes ``cfg.my_name``;
+        the other labels are named by the local LLM from explicit evidence in
+        the conversation (introductions, being addressed by name), verified
+        against the text.
         """
-        from . import summarizer, transcriber
+        from . import summarizer, transcriber, voicebook
 
         cfg = self.cfg
         lbl = transcriber._labels(cfg.language)
-        mapping = {}
-        if (cfg.my_name or "").strip():
+        try:
+            mapping = voicebook.recognize(segments)
+        except Exception:  # noqa: BLE001 — recognition is best-effort
+            mapping = {}
+        if (cfg.my_name or "").strip() and lbl["local"] not in mapping \
+                and cfg.my_name.strip() not in mapping.values():
             mapping[lbl["local"]] = cfg.my_name.strip()
         labels = list(dict.fromkeys(s.speaker for s in segments
                                     if s.speaker and s.speaker not in mapping))
@@ -605,7 +614,8 @@ class Pipeline:
         self.ensure_model(transcriber.mlx_repo(cfg.model), f"{_tx_label} {cfg.model}")
         with tempfile.TemporaryDirectory(prefix="meetre_retx_") as tmp:
             mix, stems, duration = decode_sources(Path(tmp), found or {"mix": mp3})
-            segments, backend, persons = self.transcribe_audio(mix, stems)
+            segments, backend, persons = self.transcribe_audio(mix, stems,
+                                                               auto_speakers=True)
         if not segments:
             raise RuntimeError("No speech detected in the audio backup.")
         if persons:
@@ -667,7 +677,8 @@ class Pipeline:
             if not in_backup:
                 stamp = started.strftime("%Y-%m-%d_%H-%M-%S")
                 rec.save_mp3(mix, backup / f"{stamp}_{_slugify(title)}.mp3")
-            segments, backend, persons = self.transcribe_audio(mix, stems)
+            segments, backend, persons = self.transcribe_audio(mix, stems,
+                                                               auto_speakers=True)
         if not segments:
             raise RuntimeError(f"No speech detected in {src.name}.")
         if persons:

@@ -322,6 +322,24 @@ final class AppModel {
         }
     }
 
+    /// Rename a speaker in the selected meeting; `remember` saves the voice so
+    /// later meetings recognise the person (engine: voicebook.py).
+    func renameSpeaker(_ speaker: String, to name: String, remember: Bool) {
+        guard let id = selectedID else { return }
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty, n != speaker || remember else { return }
+        Task {
+            do {
+                let m = try await engine.call("meetings.rename_speaker",
+                                              ["id": .string(id), "speaker": .string(speaker),
+                                               "name": .string(n), "remember": .bool(remember)],
+                                              as: Meeting.self)
+                if selectedID == id { meeting = m }
+                if let i = meetings.firstIndex(where: { $0.id == id }) { meetings[i] = m.summary }
+            } catch { banner = error.localizedDescription }
+        }
+    }
+
     func delete(_ id: String) {
         Task {
             do {

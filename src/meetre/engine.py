@@ -821,6 +821,34 @@ class Engine:
             move_words(path, new)
         return meeting_summary(new)
 
+    def m_meetings_rename_speaker(self, id: str, speaker: str, name: str,
+                                  remember: bool = True) -> dict:
+        """Rename a speaker in a meeting; with ``remember`` the voice is saved
+        under ``name`` and recognised in later meetings (voicebook.py).
+        Returns the full meeting plus ``voice_saved``."""
+        from . import voicebook
+
+        path = self._path(id)
+        try:
+            saved = voicebook.rename_speaker(path, speaker, name, remember=remember)
+        except KeyError:
+            raise RPCError(f"No speaker {speaker!r} in this meeting.", -32602)
+        except ValueError as e:
+            raise RPCError(str(e), -32602)
+        return {**meeting_full(path, self.cfg.audio_backup_path), "voice_saved": saved}
+
+    def m_voices_list(self) -> list:
+        from . import voicebook
+
+        return voicebook.people()
+
+    def m_voices_forget(self, name: str) -> dict:
+        from . import voicebook
+
+        if not voicebook.forget(name):
+            raise RPCError(f"No saved voice named {name!r}.", -32602)
+        return {}
+
     def m_meetings_delete(self, id: str) -> dict:
         path = self._path(id)
         try:

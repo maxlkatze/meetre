@@ -249,6 +249,17 @@ def handle(method, p):
         m = next(x for x in MEETINGS if x["id"] == p["id"])
         m["title"] = p["title"]
         return m
+    if method == "meetings.rename_speaker":
+        m = next(x for x in MEETINGS if x["id"] == p["id"])
+        m["speakers"] = sorted({p["name"] if x == p["speaker"] else x for x in m.get("speakers") or []})
+        for t in TURNS:
+            if t.get("speaker") == p["speaker"]:
+                t["speaker"] = p["name"]
+        return {**full(p["id"]), "voice_saved": bool(p.get("remember", True))}
+    if method == "voices.list":
+        return []
+    if method == "voices.forget":
+        return {}
     if method == "meetings.delete":
         MEETINGS[:] = [m for m in MEETINGS if m["id"] != p["id"]]
         return {}

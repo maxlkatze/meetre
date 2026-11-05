@@ -34,7 +34,18 @@ WINDOWS = 4
 # than clean audio. 0.5 split one person into 2-3 "voices" on 21 of 34 sides.
 SAME_VOICE = 0.4    # average-linkage cosine similarity to merge two clusters
 MIN_CLUSTER_SECONDS = 10.0  # a voice needs this much speech …
-MIN_CLUSTER_SHARE = 0.15    # … and this share of the side to count as a person
+# 0.15 hid real people in a 4-person room meeting (2026-11-03: 101 s = 14.6 %
+# and 38 s = 5.5 % of 690 s, both 0.25-0.38 to the mic owner's voice from his
+# calls, which matched another cluster at 0.88); 0.05 keeps them and still
+# finds one voice on all 14 one-person sides of 8 real calls (one person's
+# 473 s on this mic stayed one cluster at 0.4).
+MIN_CLUSTER_SHARE = 0.05    # … and this share of the side to count as a person
+# ``num_speakers`` is a hint, not a cap: when it asks for more voices than the
+# clustering found, the side is split further, but a voice still needs
+# MIN_CLUSTER_SECONDS and this (lower) share. Forcing the count outright left
+# 1-4 s scraps as "people" and merged real ones (2026-11-03, 14 min in a room).
+HINT_SHARE = 0.05
+HINT_EXTRA = 12     # try up to this many clusters past the hint for real ones
 ECHO_SIMILAR = 0.55 # mic print this close to a call voice (and overlapping it) = echo
 
 _extractor = None
@@ -129,22 +140,38 @@ def _prints(audio: np.ndarray, segs: list) -> tuple:
     return long, np.stack([voiceprint(clips[i]) for i in long])
 
 
-def _voices(segs: list, long: list, prints: np.ndarray, n: Optional[int]) -> dict:
+def _voices(segs: list, long: list, prints: np.ndarray, n: Optional[int] = None) -> dict:
     """``{segment index: voice}`` for the long segments; spill-over clusters
-    (too little speech to be a person) are folded into the closest real one."""
-    if len(long) < 2 or n == 1:
+    (too little speech to be a person) are folded into the closest real one.
+
+    ``n`` is a hint (how many voices the user expects on this side): the
+    automatic result is kept unless it found fewer, and then the side is split
+    further only into clusters with enough speech to be a person. It never
+    merges voices the clustering told apart."""
+    if len(long) < 2:
         return {i: 0 for i in long}
-    raw = dict(zip(long, _cluster(prints, n)))
+    auto = _fold(segs, long, prints, dict(zip(long, _cluster(prints, None))),
+                 MIN_CLUSTER_SHARE)
+    if not n or len(set(auto.values())) >= n:
+        return auto
+    for m in range(n, min(len(long), n + HINT_EXTRA) + 1):
+        raw = _fold(segs, long, prints, dict(zip(long, _cluster(prints, m))), HINT_SHARE)
+        if len(set(raw.values())) >= n:
+            return raw
+    return auto
+
+
+def _fold(segs: list, long: list, prints: np.ndarray, raw: dict, share: float) -> dict:
+    """Clusters with < MIN_CLUSTER_SECONDS or < ``share`` of the side's speech
+    join the closest real cluster."""
     talk: dict = {}
     for i, k in raw.items():
         talk[k] = talk.get(k, 0.0) + segs[i].end - segs[i].start
     total = sum(talk.values())
-    if n is not None:  # the count was given: trust it, keep every cluster
-        real = list(talk)
-    else:
-        real = [k for k, t in talk.items()
-                if t >= MIN_CLUSTER_SECONDS and t >= MIN_CLUSTER_SHARE * total] \
-            or [max(talk, key=talk.get)]
+    real = [k for k, t in talk.items()
+            if t >= MIN_CLUSTER_SECONDS and t >= share * total] \
+        or [max(talk, key=talk.get)]
+
     def centroid(k):
         c = prints[[j for j, i in enumerate(long) if raw[i] == k]].mean(0)
         return c / (np.linalg.norm(c) + 1e-9)
@@ -202,8 +229,12 @@ def _label(audio: np.ndarray, segs: list, long: list, prints: np.ndarray, raw: d
     (possibly split) segments."""
     voices = sorted(set(raw.values()))
     if len(voices) <= 1:
+        voice = None
+        if len(prints):  # the side's one voice, for recognising it next time
+            voice = prints.mean(0)
+            voice = voice / (np.linalg.norm(voice) + 1e-9)
         for s in segs:
-            s.speaker = single_label
+            s.speaker, s.voice = single_label, voice
         return segs
     from .attribution import split_by_turns
 
@@ -211,7 +242,8 @@ def _label(audio: np.ndarray, segs: list, long: list, prints: np.ndarray, raw: d
     for k in voices:
         c = prints[[j for j, i in enumerate(long) if raw[i] == k]].mean(0)
         cents.append(c / (np.linalg.norm(c) + 1e-9))
-    turns = _track(audio, segs, np.stack(cents), {i: prints[j] for j, i in enumerate(long)})
+    cents = np.stack(cents)
+    turns = _track(audio, segs, cents, {i: prints[j] for j, i in enumerate(long)})
     segs = split_by_turns(segs, turns)
     labels: List[Optional[int]] = []
     for s in segs:
@@ -229,7 +261,7 @@ def _label(audio: np.ndarray, segs: list, long: list, prints: np.ndarray, raw: d
         order.setdefault(labels[i], len(order) + 1)
     out: list = []
     for s, k in zip(segs, labels):
-        s.speaker = f"{multi_label} {order[k]}"
+        s.speaker, s.voice = f"{multi_label} {order[k]}", cents[k]
         prev = out[-1] if out else None
         if prev is not None and prev.speaker == s.speaker and prev.words and s.words \
                 and s.start - prev.end < 0.05:  # split pieces that ended up one voice
@@ -244,7 +276,8 @@ def split_side(audio: np.ndarray, segs: list, single_label: str, multi_label: st
                n: Optional[int] = None) -> list:
     """Label ``segs`` (one side, timestamps into ``audio``):
     ``single_label`` if one voice, else ``"{multi_label} 1"``, ``… 2`` in order
-    of first appearance. ``n`` = known number of voices on this side. Returns
+    of first appearance. ``n`` = expected number of voices on this side (a
+    hint: more are kept when the voices clearly differ). Returns
     the segments, split where the speaker changes mid-segment."""
     long, prints = _prints(audio, segs)
     return _label(audio, segs, long, prints, _voices(segs, long, prints, n),
@@ -257,21 +290,16 @@ def split_sides(mic: np.ndarray, mic_segs: list, system: np.ndarray, sys_segs: l
     through the speakers (sounds like a call voice *and* overlaps call speech),
     then split each side into voices. Returns ``(mic_segs, sys_segs)``: the
     kept mic segments, both sides split where the speaker changes.
-    ``n_total`` = everyone in the meeting: the call's voices are found first,
-    the mic is split into the rest.
+    ``n_total`` = everyone in the meeting, a hint: both sides are clustered
+    on their own; if that finds fewer voices, the call side (then the mic) is
+    split further — never merged down to the count.
 
     Complements the text-based check (:func:`attribution.drop_echo`, run
     first), which misses echo the mic transcribed differently; on real calls
     the echo forms its own mic "voice" at 0.6-0.85 similarity to the call vs.
     ≤ 0.35 for your own voice."""
     s_long, s_prints = _prints(system, sys_segs)
-    s_raw = _voices(sys_segs, s_long, s_prints, None)
-    if n_total and mic_segs and len(set(s_raw.values())) > max(1, n_total - 1):
-        # Someone talks into the mic, so the call has at most everyone else.
-        s_raw = _voices(sys_segs, s_long, s_prints, max(1, n_total - 1))
-    n_local = None
-    if n_total:  # everyone not heard on the call is in the room
-        n_local = max(1, n_total - (len(set(s_raw.values())) if s_raw else 0))
+    s_raw = _voices(sys_segs, s_long, s_prints)
     m_long, m_prints = _prints(mic, mic_segs)
     echo = set()
     if len(s_long) and len(m_long):
@@ -287,7 +315,18 @@ def split_sides(mic: np.ndarray, mic_segs: list, system: np.ndarray, sys_segs: l
     kept = [mic_segs[i] for i in keep]
     k_long = [keep.index(i) for i in m_long if i not in echo]
     k_prints = m_prints[[j for j, i in enumerate(m_long) if i not in echo]] if k_long else m_prints[:0]
-    kept = _label(mic, kept, k_long, k_prints, _voices(kept, k_long, k_prints, n_local),
+    m_raw = _voices(kept, k_long, k_prints)
+    if n_total:
+        def count(segs_, raw):
+            return max(1, len(set(raw.values()))) if segs_ else 0
+
+        n_call, n_mic = count(sys_segs, s_raw), count(kept, m_raw)
+        if n_call + n_mic < n_total and len(s_long) >= 2:
+            s_raw = _voices(sys_segs, s_long, s_prints, n_total - n_mic)
+            n_call = count(sys_segs, s_raw)
+        if n_call + n_mic < n_total and len(k_long) >= 2:
+            m_raw = _voices(kept, k_long, k_prints, n_total - n_call)
+    kept = _label(mic, kept, k_long, k_prints, m_raw,
                   labels["local"], labels["local_multi"])
     sys_segs = _label(system, sys_segs, s_long, s_prints, s_raw,
                       labels["remote"], labels["remote_multi"])

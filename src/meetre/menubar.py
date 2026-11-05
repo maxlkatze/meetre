@@ -274,7 +274,7 @@ def _build_settings_window(cfg: Config, on_start, *, want_name: bool):
     slider.setIntValue_(int(init_spk))
 
     def spk_text(n):
-        return "Speakers: auto" if n == 0 else f"Speakers: exactly {n}"
+        return "Speakers: auto" if n == 0 else f"Speakers: at least {n}"
 
     spk_label.setStringValue_(spk_text(int(init_spk)))
 

@@ -660,12 +660,67 @@ def _parse_speakers(spec: str):
 
 def speakers_label(cfg: Config) -> str:
     if cfg.num_speakers:
-        return f"exactly {cfg.num_speakers}"
+        return f"at least {cfg.num_speakers} (a hint; more if the voices differ)"
     if cfg.min_speakers or cfg.max_speakers:
         lo = cfg.min_speakers if cfg.min_speakers else "?"
         hi = cfg.max_speakers if cfg.max_speakers else "?"
         return f"estimate {lo}–{hi}"
     return "auto-estimate"
+
+
+def do_voices(cfg: Config, action: str, args: list) -> None:
+    """Known voices (voicebook.py): list them, forget one, or rename a speaker
+    in a meeting — which also saves the voice under that name."""
+    from rich.table import Table
+
+    from . import voicebook
+
+    if action == "list":
+        people = voicebook.people()
+        if not people:
+            ui.console.print("No saved voices yet. Name a speaker: "
+                             "[bold]meetre voices rename MEETING \"Vor Ort 1\" Anna[/bold]")
+            return
+        t = Table(title="Known voices", border_style="cyan")
+        for col in ("Name", "Speech", "Meetings", "Updated"):
+            t.add_column(col)
+        for p in people:
+            t.add_row(p["name"], f"{p['seconds'] / 60:.1f} min", str(p["meetings"]),
+                      (p["updated"] or "").replace("T", " "))
+        ui.console.print(t)
+    elif action == "forget":
+        if len(args) != 1:
+            ui.error("Usage: meetre voices forget NAME")
+            return
+        if voicebook.forget(args[0]):
+            ui.ok(f"Forgot {args[0]}'s voice.")
+        else:
+            ui.error(f"No saved voice named {args[0]!r}.")
+    else:  # rename
+        if len(args) != 3:
+            ui.error("Usage: meetre voices rename MEETING OLD NEW  "
+                     "(MEETING: transcript path, id, or 'last')")
+            return
+        meeting, old, new = args
+        if meeting == "last":
+            files = sorted(cfg.transcripts_path.glob("*.md"))
+            path = files[-1] if files else None
+        elif Path(meeting).expanduser().is_file():
+            path = Path(meeting).expanduser()
+        else:
+            hits = sorted(cfg.transcripts_path.glob(f"{meeting}*.md"))
+            path = hits[0] if len(hits) == 1 else None
+        if path is None:
+            ui.error(f"Can't find one meeting for {meeting!r}.")
+            return
+        try:
+            saved = voicebook.rename_speaker(path, old, new)
+        except KeyError:
+            ui.error(f"No speaker {old!r} in {path.name}.")
+            return
+        ui.ok(f"{old} → {new} in {path.name}"
+              + (" — voice saved, it'll be recognised from now on." if saved
+                 else " (no voiceprint for this meeting: re-transcribe it to save the voice)."))
 
 
 def do_speakers(cfg: Config, spec: Optional[str] = None) -> None:
@@ -718,8 +773,8 @@ def do_config(cfg: Config, key: Optional[str] = None, value: Optional[str] = Non
         coerced = value.lower() in ("on", "true", "yes", "1")
     elif isinstance(current, int) or key in ("mic_device", "system_device",
                                               "num_speakers", "min_speakers", "max_speakers"):
-        coerced = int(value) if value not in ("", "none", "None") else None
-    elif value in ("", "none", "None"):
+        coerced = None if value.lower() in ("", "none", "null", "auto") else int(value)
+    elif value.lower() in ("", "none", "null"):
         coerced = None
     else:
         coerced = value
@@ -861,6 +916,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("speakers", help="Set speaker count: auto | N | N-M (e.g. 3-6)")
     ps.add_argument("spec", nargs="?", help="auto, an exact count, or a range like 3-6")
 
+    pv = sub.add_parser("voices", help="Known voices: list | forget NAME | "
+                                       "rename MEETING OLD NEW (names + remembers a speaker)")
+    pv.add_argument("action", nargs="?", default="list", choices=["list", "forget", "rename"])
+    pv.add_argument("args", nargs="*")
+
     pc = sub.add_parser("config", help="View or edit configuration")
     pc.add_argument("key", nargs="?")
     pc.add_argument("value", nargs="?")
@@ -914,6 +974,8 @@ def main(argv: Optional[list] = None) -> int:
             do_persons(cfg, args.value)
         elif args.command == "speakers":
             do_speakers(cfg, args.spec)
+        elif args.command == "voices":
+            do_voices(cfg, args.action, args.args)
         elif args.command == "config":
             do_config(cfg, args.key, args.value)
     except KeyboardInterrupt:

@@ -87,6 +87,9 @@ Errors: `{"id":1,"error":{"code":-32000,"message":"…","data":{"hint":"…"}}}`
 | `backups.list` | – | `[{path, name, started_at, size, stems:[str]}]` audio backups without a transcript, newest first |
 | `meetings.rename` | `{id, title}` | `MeetingSummary` |
 | `meetings.delete` | `{id}` | `{}` (moves file to Trash) |
+| `meetings.rename_speaker` | `{id, speaker, name, remember?}` | `Meeting` + `voice_saved` (renames in the transcript; `remember` saves the voice) |
+| `voices.list` | `{}` | `[{name, seconds, meetings, updated}]` (known voices) |
+| `voices.forget` | `{name}` | `{}` |
 | `meetings.reveal` | `{id}` | `{}` (Finder) |
 | `meetings.open_note` | `{id}` | `{}` (Apple Notes, if a note exists) |
 | `chat.send` | `{meeting_id?, history:[{role,content}], message}` | `{text}` final; streams `chat.delta` |

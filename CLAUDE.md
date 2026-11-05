@@ -58,6 +58,10 @@ sync, companion app plan). `mac/build.sh` → `mac/build/Meetre.app`. It spawns
 - `voices.py` — speaker split per side: TitaNet voiceprints per segment,
   clustering, a per-second voice track that splits mixed lines, echo-voice
   removal (`split_sides`, `split_side`).
+- `voicebook.py` — known voices across meetings: per-meeting print sidecar
+  (`.{stem}.voices.json`), book `~/.config/meetre/voices.json`, `recognize`
+  (≥ 0.5 names, ≥ 0.6 refines), `rename_speaker` (rewrites the .md + saves the
+  voice), `forget`. CLI `meetre voices`, RPC `meetings.rename_speaker`.
 - `echo.py` — offline echo removal: subtracts the call stem from the mic
   (delay tracking + NLMS + residual suppression; `clean_stem`).
 - `transcript.py` — render speaker-labelled Markdown transcript (`write_transcript`).
@@ -98,8 +102,15 @@ sync, companion app plan). `mac/build.sh` → `mac/build/Meetre.app`. It spawns
   the stems; within a side, segments ≥ 0.8 s get a TitaNet print, clustered at
   0.4 (same person over a call scores 0.4-0.7, different people 0.0-0.35); with
   several voices every second is matched again so mixed lines split
-  (`split_by_turns`). ~8 s for a 25-min call. `num_speakers` counts everyone:
-  call voices first, the mic gets the rest. The menubar `_finish` publishes progressively via `_publish`:
+  (`split_by_turns`). ~8 s for a 25-min call. `num_speakers` counts everyone
+  but is only a **hint** (since 2026-11-03): each side is clustered on its own,
+  and if that finds fewer voices the call side, then the mic, is split further
+  into clusters with ≥ 10 s and ≥ 5 % of the speech (auto uses the same 5 %:
+  15 % hid two of four people in a room meeting; 14 known one-person call
+  sides still give one voice at 5 %). Forcing the count merged
+  a 3-4 person room meeting into 2 voices and left 1-4 s scraps as "people".
+  Re-transcribe and import always use auto. Voice-book names win over
+  `my_name` and the LLM (`Pipeline.name_speakers`). The menubar `_finish` publishes progressively via `_publish`:
   transcript (.md + Apple Note) right after ASR, rewritten in place after
   speakers, then after summary/title (`update_apple_note`).
 - **The LLM is GGUF-only (llama-server), since 2026-10-25.** Measured on 4 real
