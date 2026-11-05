@@ -292,7 +292,8 @@ final class AppModel {
                 let m = try await engine.call("meetings.get", ["id": .string(id)], as: Meeting.self)
                 if selectedID == id { meeting = m }
             } catch {
-                banner = error.localizedDescription
+                // Renamed meanwhile (auto-title): the selection already moved on.
+                if selectedID == id { banner = error.localizedDescription }
             }
         }
     }

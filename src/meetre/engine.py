@@ -12,6 +12,7 @@ start the real stdout fd is duplicated for protocol use and fd 1 (plus
 
 from __future__ import annotations
 
+import glob
 import inspect
 import json
 import os
@@ -678,7 +679,12 @@ class Engine:
             raise RPCError(f"Invalid meeting id: {id!r}", -32602)
         p = self.cfg.transcripts_path / f"{id}.md"
         if not p.exists():
-            raise RPCError(f"Meeting not found: {id}", -32004)
+            # Auto-titling renamed it while the app still asked by the old id
+            # (the rename event crosses the request): the start time is unique.
+            same = sorted(self.cfg.transcripts_path.glob(f"{glob.escape(id[:19])}_*.md"))
+            if len(id) < 19 or len(same) != 1:
+                raise RPCError(f"Meeting not found: {id}", -32004)
+            p = same[0]
         return p
 
     def m_meetings_list(self, query: Optional[str] = None) -> list:
